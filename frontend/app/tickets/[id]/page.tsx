@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { ArrowLeft, MapPin, User, Brain, Star, Paperclip, AlertTriangle } from "lucide-react";
+import { ArrowLeft, MapPin, User, Brain, Star, Paperclip, AlertTriangle, Lightbulb } from "lucide-react";
 import clsx from "clsx";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -168,32 +168,45 @@ export default function TicketDetailPage() {
         {!ticket.assignment ? (
           <p className="text-gray-500 text-sm">Назначение не выполнено</p>
         ) : (
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <p className="text-xs text-gray-500 mb-2">Офис</p>
-              <p className="text-white font-semibold">{ticket.assignment.assigned_office}</p>
-            </div>
-            <div>
-              <p className="text-xs text-gray-500 mb-2">Round Robin индекс</p>
-              <p className="text-gray-300">{ticket.assignment.round_robin_index}</p>
-            </div>
-            {m && (
-              <>
-                <div>
-                  <p className="text-xs text-gray-500 mb-2">Менеджер</p>
-                  <p className="text-white font-semibold">{m.full_name}</p>
-                  <p className="text-xs text-gray-500">{m.position}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-gray-500 mb-2">Навыки менеджера</p>
-                  <div className="flex gap-1 flex-wrap">
-                    {(m.skills || []).map((s: string) => (
-                      <span key={s} className="px-2 py-0.5 rounded text-xs bg-blue-900/40 text-blue-300">{s}</span>
-                    ))}
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <p className="text-xs text-gray-500 mb-2">Офис</p>
+                <p className="text-white font-semibold">{ticket.assignment.assigned_office}</p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500 mb-2">Round Robin индекс</p>
+                <p className="text-gray-300">{ticket.assignment.round_robin_index}</p>
+              </div>
+              {m && (
+                <>
+                  <div>
+                    <p className="text-xs text-gray-500 mb-2">Менеджер</p>
+                    <p className="text-white font-semibold">{m.full_name}</p>
+                    <p className="text-xs text-gray-500">{m.position}</p>
                   </div>
-                  <p className="text-xs text-gray-500 mt-1">Нагрузка: {m.current_load}</p>
+                  <div>
+                    <p className="text-xs text-gray-500 mb-2">Навыки менеджера</p>
+                    <div className="flex gap-1 flex-wrap">
+                      {(m.skills || []).map((s: string) => (
+                        <span key={s} className="px-2 py-0.5 rounded text-xs bg-blue-900/40 text-blue-300">{s}</span>
+                      ))}
+                    </div>
+                    <p className="text-xs text-gray-500 mt-1">Нагрузка: {m.current_load}</p>
+                  </div>
+                </>
+              )}
+            </div>
+            {ticket.cross_city_consultation_note && (
+              <div className="rounded-lg border border-cyan-700/40 bg-cyan-900/20 p-3">
+                <div className="mb-1 flex items-center gap-1.5">
+                  <Lightbulb className="h-3.5 w-3.5 text-cyan-300" />
+                  <p className="text-xs text-cyan-300">Онлайн-консультация</p>
                 </div>
-              </>
+                <p className="text-sm leading-relaxed text-cyan-100">
+                  {ticket.cross_city_consultation_note}
+                </p>
+              </div>
             )}
           </div>
         )}

@@ -39,7 +39,7 @@ curl -X POST http://localhost:8000/api/pipeline/reset
 | File | Purpose |
 |---|---|
 | `backend/llm.py` | LLM calls: `analyze_ticket()`, `analyze_image()`, `get_attachment_context()` |
-| `backend/geocoding.py` | City coords map, fuzzy matching, Nominatim, `find_sorted_offices()` |
+| `backend/geocoding.py` | 2GIS API geocoding (`ru_KZ`), KZ bbox validation, Latin→Cyrillic aliases, `find_sorted_offices()` |
 | `backend/routing.py` | Business rules engine + Round Robin state |
 | `backend/pipeline.py` | ETL: CSV → DB → LLM → route → save |
 | `backend/main.py` | FastAPI app + all endpoints |
@@ -54,7 +54,7 @@ curl -X POST http://localhost:8000/api/pipeline/reset
 - **Backend**: FastAPI + SQLAlchemy (sync) + psycopg2
 - **LLM**: `gpt-4.1-nano` via OpenAI API (text classification **and** vision)
 - **DB**: PostgreSQL — user=fire, password=fire123, db=fire_db
-- **Geocoding**: Hardcoded KZ city map → fuzzy matching (difflib) → Nominatim (OSM)
+- **Geocoding**: 2GIS API (`ru_KZ` locale) → hardcoded KZ dict (fallback) → difflib fuzzy matching
 - **Frontend**: Next.js 14 App Router + Tailwind + Recharts
 - **venv**: `backend/.venv/` — always activate before running backend
 
@@ -82,16 +82,18 @@ curl -X POST http://localhost:8000/api/pipeline/reset
 
 ## Geocoding Strategy (geocoding.py)
 
-Multi-tier fallback in `geocode_client()`:
-1. Full street address via Nominatim (if `street` is provided)
-2. Direct city lookup in `KZ_CITY_COORDS` hardcoded map
-3. Direct region lookup
-4. Fuzzy city lookup via `difflib` (catches 1-2 char typos)
-5. Fuzzy region lookup
-6. City-only Nominatim (unknown cities)
-7. Partial substring match (legacy)
+Primary API: **2GIS Geocoder** (`locale=ru_KZ`) — requires `TWOGIS_API_KEY` in `backend/.env`.
+All results validated against KZ bounding box (~40.5–55.5°N, 50.2–87.4°E) to reject out-of-KZ hits.
+Latin-script city/region names (e.g. "Aktau", "Semipalatinsk") normalised via `_LATIN_TO_CYRILLIC` alias table.
 
-`CITY_TO_OFFICES` maps city → list of offices. If a city has exactly one office and no street address is given, routing short-circuits to that office without a distance calculation.
+5-tier fallback in `geocode_client()`:
+1. **2GIS**: city + region + "Казахстан" — bbox-validated
+2. **2GIS**: region + "Казахстан" — bbox-validated (if no city or city failed)
+3. Direct region lookup in `KZ_CITY_COORDS` hardcoded dict (offline fallback)
+4. Fuzzy region match via `difflib` (catches 1–2 char typos)
+5. Partial substring match on region (last resort)
+
+`CITY_TO_OFFICES` maps city → list of offices. If a city has exactly one office, routing short-circuits to that office without a distance calculation.
 
 ---
 
@@ -149,5 +151,6 @@ Incremental migrations run on startup via `database._run_migrations()` using `AL
 - `tickets.csv` columns have trailing spaces — stripped with `df.columns = [c.strip() for c in df.columns]`
 - Pipeline is idempotent — skips already-analyzed tickets; use reset to rerun from scratch
 - Round-robin counters are in-memory — reset on server restart (fine for hackathon)
-- Nominatim rate limit: 1 req/sec — pipeline adds 1.1s sleep between calls automatically
+- 2GIS rate-limited to 0.25s between calls (in-process sleep)
 - `CITY_TO_OFFICES` keys are lowercase-normalised office names (e.g. `"алматы"` → `["Алматы"]`)
+- `TWOGIS_API_KEY` (or `DGIS_API_KEY`) must be set in `backend/.env`

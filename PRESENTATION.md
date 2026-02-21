@@ -158,7 +158,7 @@ business_units.csv   Geocoding            ──►  Priority      ──►  Da
 | **Backend** | Python + FastAPI | Async, fast, zero boilerplate |
 | **LLM** | `gpt-5-nano` (OpenAI) | Vision + text, cheap, fast, literal |
 | **Database** | PostgreSQL + SQLAlchemy | Relational, reliable, flexible |
-| **Geocoding** | Nominatim + difflib | Free, no API key, typo-tolerant |
+| **Geocoding** | 2GIS API (`ru_KZ`) + difflib | CIS-optimised, KZ bbox validation, typo-tolerant |
 | **Frontend** | Next.js 14 + Tailwind | App Router, dark UI, Recharts |
 | **AI Assistant** | `gpt-5-nano` → SQL | NL → SQL → live chart |
 
@@ -236,24 +236,23 @@ response = client.chat.completions.create(
 
 ---
 
-## Geocoding — 7-Tier Fallback
+## Geocoding — 5-Tier Fallback
 
-Client addresses in the CSV often have **typos, missing fields, or unknown city names.**
+Client addresses in the CSV often have **typos, missing fields, or Latin-script city names.**
 
 ```
-Input: city="Алмата", street="ул. Абая", house="12"
+Input: city="Красный Яр", region="Акмолинская"
                           ↓
-1. Nominatim (OSM) — full street address         → (43.2531, 76.8992) ✓ STOP
-2. Direct city lookup in 70+ KZ cities hardcoded
-3. Direct region lookup
-4. Fuzzy city match (difflib, cutoff=0.75)       ← catches "Алмата" → "Алматы"
-5. Fuzzy region match
-6. City-only Nominatim (unknown cities)
-7. Partial substring fallback
+1. 2GIS API — "Красный Яр, Акмолинская, Казахстан"  → (53.32, 69.26) ✓
+   locale=ru_KZ  +  KZ bbox check  ← rejects out-of-KZ hits
+2. 2GIS API — "region, Казахстан"  (if no city or city failed)
+3. Direct region lookup in KZ_CITY_COORDS (offline fallback)
+4. Fuzzy region match (difflib, cutoff=0.75)
+5. Partial substring fallback
 ```
 
-**No paid API. No Google Maps.**
-Nominatim (OpenStreetMap) is free, rate-limited to 1 req/sec automatically.
+**Latin aliases handled:** "Aktau" → "Актау", "Semipalatinsk" → "Семей", etc.
+`locale=ru_KZ` pins results to Kazakhstan; bbox double-checks coordinates are within ~40.5–55.5°N, 50.2–87.4°E.
 
 ---
 
@@ -367,8 +366,8 @@ gpt-5-nano handles text + images + SQL generation. No model routing, no fallback
 ### Why heuristic pre-classification?
 Fast-path rules (keyword matching for fraud, spam, claims) run in microseconds. Only ambiguous tickets hit the LLM → 30–50% fewer API calls.
 
-### Why 7-tier geocoding instead of a paid maps API?
-Kazakhstan address data is inconsistent. A cascade of free tools (hardcoded coords + difflib + Nominatim) handles 95%+ of cases. Zero cost.
+### Why 2GIS instead of Google Maps?
+2GIS is purpose-built for CIS/Central Asia — superior Kazakhstan address data. `locale=ru_KZ` keeps results within KZ; a bounding box check rejects any stray out-of-country hits. difflib fuzzy matching handles typos offline. Latin-script city names (e.g. "Aktau") normalised automatically via alias table.
 
 ### Why eligibility-flag RR keys?
 Ensures fair alternation within each logical manager pool, not just within each unique ticket-field combination. Matches real-world call center behavior.

@@ -109,13 +109,14 @@ export default function TicketsPage() {
                 <th className="px-4 py-3">Город</th>
                 <th className="px-4 py-3">Офис</th>
                 <th className="px-4 py-3">Менеджер</th>
+                <th className="px-4 py-3">Онлайн</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
-                <tr><td colSpan={10} className="px-4 py-8 text-center text-gray-500">Загрузка...</td></tr>
+                <tr><td colSpan={11} className="px-4 py-8 text-center text-gray-500">Загрузка...</td></tr>
               ) : filtered.length === 0 ? (
-                <tr><td colSpan={10} className="px-4 py-8 text-center text-gray-500">Нет данных</td></tr>
+                <tr><td colSpan={11} className="px-4 py-8 text-center text-gray-500">Нет данных</td></tr>
               ) : (
                 filtered.map((t, i) => (
                   <tr key={t.id} className="border-b border-gray-800/60 hover:bg-gray-800/30 transition-colors">
@@ -159,6 +160,15 @@ export default function TicketsPage() {
                     <td className="px-4 py-3 text-gray-400">{t.city ?? "—"}</td>
                     <td className="px-4 py-3 text-gray-400">{t.assignment?.assigned_office ?? "—"}</td>
                     <td className="px-4 py-3 text-gray-300">{t.assignment?.manager?.full_name ?? "—"}</td>
+                    <td className="px-4 py-3">
+                      {t.cross_city_consultation_note ? (
+                        <span className="px-2 py-1 rounded text-xs bg-cyan-900/40 text-cyan-300">
+                          Есть альтернатива
+                        </span>
+                      ) : (
+                        <span className="text-gray-600">—</span>
+                      )}
+                    </td>
                   </tr>
                 ))
               )}

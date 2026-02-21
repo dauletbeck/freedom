@@ -4,9 +4,12 @@ AI-powered ticket routing system for Freedom Finance customer support.
 
 ## Quick Start
 
-### 1. Set API key
+### 1. Set API keys
 ```bash
-echo "ANTHROPIC_API_KEY=your_key_here" > .env
+cat > .env <<EOF
+ANTHROPIC_API_KEY=your_key_here
+TWOGIS_API_KEY=your_2gis_api_key_here
+EOF
 ```
 
 ### 2. Start with Docker Compose
@@ -78,7 +81,7 @@ business.csv ─┘         ↑
 ### Stack
 - **Backend**: Python + FastAPI + SQLAlchemy + psycopg2
 - **AI**: Claude claude-sonnet-4-6 (Anthropic SDK) with tool_use for structured JSON
-- **Geocoding**: Hardcoded Kazakhstan city coordinates + Haversine distance
+- **Geocoding**: 2GIS Geocoder API + hardcoded Kazakhstan city coordinates + Haversine distance
 - **Database**: PostgreSQL
 - **Frontend**: Next.js 14 + Tailwind CSS + Recharts
 - **Star Task**: AI assistant with natural language → SQL → chart generation

@@ -68,6 +68,7 @@ class TicketOut(BaseModel):
     house: Optional[str]
     analysis: Optional[TicketAnalysisOut]
     assignment: Optional[AssignmentOut]
+    cross_city_consultation_note: Optional[str] = None
 
     class Config:
         from_attributes = True

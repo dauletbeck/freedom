@@ -24,6 +24,7 @@ from routing import reset_counters, route_ticket
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 LABELS_CSV_PATH = os.path.join(os.path.dirname(__file__), "..", "tickets_guid_language_label.csv")
+
 LANGUAGE_LABEL_MAP = {
     "ru": "RU",
     "kk": "KZ",

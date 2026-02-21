@@ -16,7 +16,7 @@ An AI-powered pipeline that reads customer support tickets from CSV, classifies 
 | LLM (text + vision) | `gpt-4.1-nano` via OpenAI API |
 | Database | PostgreSQL |
 | ORM | SQLAlchemy (sync) + psycopg2 |
-| Geocoding | Hardcoded KZ city map + fuzzy matching (difflib) + Nominatim (OpenStreetMap) |
+| Geocoding | 2GIS API (`ru_KZ` locale) + KZ bounding box validation + difflib fuzzy fallback |
 | Frontend | Next.js 14 (App Router) + Tailwind CSS + Recharts |
 
 ---
@@ -38,7 +38,7 @@ freedom/
 │   ├── models.py               # ORM models (Ticket, TicketAnalysis, Manager, BusinessUnit, Assignment)
 │   ├── schemas.py              # Pydantic response schemas
 │   ├── llm.py                  # LLM: analyze_ticket(), analyze_image(), get_attachment_context()
-│   ├── geocoding.py            # Multi-tier geocoding: hardcoded map → fuzzy → Nominatim
+│   ├── geocoding.py            # 2GIS API (ru_KZ), KZ bbox validation, Latin→Cyrillic aliases, fuzzy fallback
 │   ├── routing.py              # Business rules engine + Round Robin state
 │   ├── pipeline.py             # ETL: CSV → DB → LLM → route → save
 │   └── main.py                 # FastAPI app + all endpoints
@@ -67,6 +67,7 @@ DATABASE_URL=postgresql://fire:fire123@localhost:5432/fire_db
 LLM_API_KEY=<openai key>
 LLM_BASE_URL=https://api.openai.com/v1
 LLM_MODEL=gpt-4.1-nano
+TWOGIS_API_KEY=<2gis key>
 ```
 
 ---
@@ -170,18 +171,20 @@ Adjustments: +2 VIP/Priority (min 6), +1 Негативный, +1 legal threats 
 
 ## Geocoding (geocoding.py)
 
-`geocode_client(city, region, country, street, house)` — multi-tier fallback:
+Primary API: **2GIS Geocoder** (`locale=ru_KZ`). Requires `TWOGIS_API_KEY` in `backend/.env`.
+All 2GIS results validated against KZ bounding box (~40.5–55.5°N, 50.2–87.4°E) to reject out-of-KZ hits.
+Latin-script inputs (e.g. "Aktau", "Semipalatinsk") normalised via `_LATIN_TO_CYRILLIC` alias table before any lookup.
 
-1. Full street address → Nominatim (only if `street` provided)
-2. Direct city lookup in `KZ_CITY_COORDS` (70+ cities hardcoded)
-3. Direct region lookup
-4. Fuzzy city match via `difflib` (catches 1-2 char typos)
-5. Fuzzy region match
-6. City-only Nominatim (unknown cities)
-7. Partial substring match (legacy)
+`geocode_client(city, region, country, street, house)` — 5-tier fallback (street/house ignored):
+
+1. **2GIS**: "city, region, Казахстан" — bbox-validated
+2. **2GIS**: "region, Казахстан" — bbox-validated (if no city or city failed)
+3. Direct region lookup in `KZ_CITY_COORDS` hardcoded dict (offline fallback)
+4. Fuzzy region match via `difflib` (catches 1–2 char typos)
+5. Partial substring match on region (last resort)
 
 `CITY_TO_OFFICES` maps normalised city name → list of offices (ready for multi-branch cities).
-Nominatim rate-limited to ≤1 req/sec automatically.
+2GIS rate-limited to 0.25s between calls (in-process sleep).
 
 ---
 
@@ -233,7 +236,7 @@ curl -X POST http://localhost:8000/api/pipeline/reset   # wipe + ready for fresh
 - `tickets.csv` columns have trailing spaces → stripped with `df.columns = [c.strip() ...]`
 - Pipeline is idempotent — skips already-analyzed tickets; reset to rerun
 - Round-robin counters are in-memory — reset on server restart
-- Nominatim adds ~1.1s per street-address ticket to pipeline runtime
+- 2GIS adds ~0.25s per geocoded ticket (rate limiter); offline fallback skips API entirely
 - `CITY_TO_OFFICES` keys are lowercase-normalised
 
 ---

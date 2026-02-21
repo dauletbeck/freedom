@@ -144,6 +144,35 @@ NEGATIVE_KEYWORDS = [
     "проблема",
     "заблок",
 ]
+LEGAL_RISK_KEYWORDS = [
+    "суд",
+    "иск",
+    "юрист",
+    "адвокат",
+    "прокурат",
+    "регулятор",
+    "комитет",
+    "цб",
+    "нацбанк",
+    "арбитраж",
+    "litigation",
+]
+ACCOUNT_BLOCK_KEYWORDS = [
+    "заблок",
+    "блокиров",
+    "замороз",
+    "ограничен",
+    "restricted",
+    "blocked",
+]
+LARGE_SUM_KEYWORDS = [
+    "большая сумма",
+    "крупная сумма",
+    "миллион",
+    "млн",
+    "large amount",
+]
+CURRENCY_MARKERS = ["тенге", "kzt", "₸", "usd", "$", "eur", "€", "доллар", "руб", "₽"]
 
 URL_PATTERN = re.compile(r"https?://|www\.", flags=re.IGNORECASE)
 LATIN_PATTERN = re.compile(r"[a-zA-Z]")
@@ -157,6 +186,7 @@ AZ_LATIN_PATTERN = re.compile(r"ı")           # U+0131 — Azerbaijani Latin
 UZ_LATIN_PATTERN = re.compile(r"ʻ")           # U+02BB — Uzbek Latin
 # Kazakh Cyrillic Ҷ (U+0546) does not appear in Kazakh; it's distinctly Uzbek Cyrillic.
 UZ_CYRILLIC_PATTERN = re.compile(r"[ҶҷӮӯ]")  # Ҷ = palatal affricate, Ӯ = Uzbek Cyrillic oʻ
+NUMBER_PATTERN = re.compile(r"\b\d[\d\s]{2,}\b")
 
 SYSTEM_PROMPT = """You are a customer support classifier for Freedom Finance (Фридом Финанс), a brokerage firm in Kazakhstan. Read the support ticket and output JSON. Do not output anything else.
 
@@ -250,15 +280,29 @@ def _infer_language(description: str) -> str:
 def _normalize_language(lang: str) -> str:
     """Map a free-form language name from the LLM to a routing code.
 
-    Only "KZ" and "ENG" have special routing rules (skill requirements).
-    Anything else — Russian, Uzbek, Azerbaijani, Tajik, unknown — routes as "RU"
-    because all managers are assumed to speak Russian.
+    Routing rule:
+    - English -> ENG
+    - Kazakh  -> KZ
+    - Russian -> RU
+    - Any other language -> RU
     """
     lower = (lang or "").strip().lower()
-    if lower in {"kazakh", "kz", "казахский", "kazak", "qazaq", "қазақша"}:
+    if not lower:
+        return "RU"
+
+    if (
+        "казах" in lower
+        or "қазақ" in lower
+        or re.search(r"\b(kazakh|kazak|qazaq|kz|kk)\b", lower) is not None
+    ):
         return "KZ"
-    if lower in {"english", "eng", "en", "английский"}:
+
+    if (
+        "англий" in lower
+        or re.search(r"\b(english|eng|en)\b", lower) is not None
+    ):
         return "ENG"
+
     return "RU"
 
 
@@ -282,6 +326,53 @@ def _base_priority(ticket_type: str) -> int:
     }.get(ticket_type, 5)
 
 
+def _mentions_large_sum(text_lower: str) -> bool:
+    if _contains_any(text_lower, LARGE_SUM_KEYWORDS):
+        return True
+
+    has_currency = _contains_any(text_lower, CURRENCY_MARKERS)
+    for raw in NUMBER_PATTERN.findall(text_lower):
+        digits = raw.replace(" ", "")
+        if not digits.isdigit():
+            continue
+        value = int(digits)
+        # High absolute amount, or medium amount when currency is explicitly mentioned.
+        if value >= 1_000_000:
+            return True
+        if has_currency and value >= 300_000:
+            return True
+    return False
+
+
+def _has_high_impact_signal(description: str, attachment_context: str | None = None) -> bool:
+    text_lower = f"{description or ''} {attachment_context or ''}".lower()
+    return (
+        _contains_any(text_lower, LEGAL_RISK_KEYWORDS)
+        or _contains_any(text_lower, ACCOUNT_BLOCK_KEYWORDS)
+        or _mentions_large_sum(text_lower)
+    )
+
+
+def _compute_priority(
+    ticket_type: str,
+    sentiment: str,
+    segment: str,
+    description: str,
+    attachment_context: str | None = None,
+) -> int | None:
+    if ticket_type == "Спам":
+        return None
+
+    priority = _base_priority(ticket_type)
+    if (segment or "").strip().lower() in {"vip", "priority"}:
+        priority = max(priority + 2, 6)
+    if sentiment == "Негативный":
+        priority += 1
+    if _has_high_impact_signal(description, attachment_context):
+        priority += 1
+    return max(1, min(10, priority))
+
+
 def _build_heuristic_result(
     description: str,
     segment: str,
@@ -292,15 +383,9 @@ def _build_heuristic_result(
     text_lower = (description or "").lower()
     if ticket_type == "Спам":
         sentiment = "Нейтральный"
-        priority = None
     else:
         sentiment = _infer_sentiment(text_lower, ticket_type)
-        priority = _base_priority(ticket_type)
-        if (segment or "").strip().lower() in {"vip", "priority"}:
-            priority = max(priority + 2, 6)
-        if sentiment == "Негативный":
-            priority += 1
-        priority = max(1, min(10, priority))
+    priority = _compute_priority(ticket_type, sentiment, segment, description or "", attachment_context)
 
     summary_parts = []
     if description:
@@ -336,7 +421,7 @@ def _try_fast_rule_based_classification(
     segment: str,
     attachment_context: str | None = None,
 ) -> dict | None:
-    text = (description or "").strip()
+    text = (description or attachment_context or "").strip()
     if not text:
         return None
 
@@ -554,7 +639,7 @@ def analyze_ticket(
         return {
             "ticket_type": "Консультация",
             "sentiment": "Нейтральный",
-            "priority": 3,
+            "priority": _compute_priority("Консультация", "Нейтральный", segment or "Mass", "", None),
             "language": "RU",
             "summary": "Обращение без текстового описания и вложения.",
             "recommendation": "Связаться с клиентом для уточнения запроса.",
@@ -575,14 +660,21 @@ def analyze_ticket(
     if attachment_context:
         attachment_section = f"\nAttachment context:\n{_truncate_text(attachment_context, MAX_ATTACHMENT_CTX_CHARS)}\n"
 
-    # If there's an image but no description, raise priority slightly
+    # Attachment-only tickets are valid: force the model to infer from image context.
     if not has_text and attachment_context:
         description_for_llm = "(Описание отсутствует — информация из вложения выше)"
+
+    attachment_only_hint = ""
+    if not has_text and attachment_context:
+        attachment_only_hint = (
+            "No text from client is available. Infer ticket_type/sentiment from attachment context.\n"
+        )
 
     user_message = f"""Classify this support ticket. Output JSON only.
 
 Segment: {segment or 'Mass'}
 Country: {country or 'Unknown'}
+{attachment_only_hint}
 Description:
 {description_for_llm}
 {attachment_section}"""
@@ -618,10 +710,18 @@ Description:
 
     except Exception as llm_err:
         print(f"[LLM] Fast-path error: {llm_err}. Returning deterministic fallback.")
+        fallback_type = "Консультация"
+        fallback_sentiment = "Нейтральный"
         return {
-            "ticket_type": "Консультация",
-            "sentiment": "Нейтральный",
-            "priority": 5,
+            "ticket_type": fallback_type,
+            "sentiment": fallback_sentiment,
+            "priority": _compute_priority(
+                fallback_type,
+                fallback_sentiment,
+                segment or "Mass",
+                description or "",
+                attachment_context,
+            ),
             "language": _infer_language(description or ""),
             "summary": "Ошибка LLM анализа. Требуется ручная проверка обращения.",
             "recommendation": "Провести ручную классификацию и проверить доступность LLM-сервиса.",
@@ -635,12 +735,16 @@ Description:
     if result.get("ticket_type") not in valid_types:
         result["ticket_type"] = "Консультация"
     if result.get("sentiment") not in valid_sentiments:
-        result["sentiment"] = "Нейтральный"
+        result["sentiment"] = _infer_sentiment((description or "").lower(), result.get("ticket_type", "Консультация"))
     if result.get("ticket_type") == "Спам":
-        result["priority"] = None
         result["sentiment"] = "Нейтральный"
-    elif not isinstance(result.get("priority"), int) or not 1 <= result["priority"] <= 10:
-        result["priority"] = 5
+    result["priority"] = _compute_priority(
+        result.get("ticket_type", "Консультация"),
+        result.get("sentiment", "Нейтральный"),
+        segment or "Mass",
+        description or "",
+        attachment_context,
+    )
 
     result.setdefault("analysis_engine", f"llm:{MODEL}")
     return result

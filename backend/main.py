@@ -5,7 +5,7 @@ from collections import defaultdict
 
 from fastapi import FastAPI, Depends, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, text
 
 from database import get_db, init_db
@@ -19,6 +19,7 @@ from schemas import (
     AssistantResponse,
 )
 from llm import run_assistant_query
+from routing import filter_managers, has_explicit_foreign_location
 
 app = FastAPI(title="FIRE — Freedom Intelligent Routing Engine", version="1.0.0")
 
@@ -32,6 +33,46 @@ app.add_middleware(
 
 # Pipeline state
 _pipeline_status = {"running": False, "progress": 0, "total": 0, "current": "", "done": False, "error": None}
+
+
+def _build_cross_city_consultation_note(ticket: Ticket, managers: List[Manager]) -> Optional[str]:
+    """Build a non-blocking UI note for explicit abroad mentions in ticket text."""
+    if not ticket.description or not has_explicit_foreign_location(ticket.description):
+        return None
+    if not ticket.analysis or not ticket.assignment:
+        return None
+    if ticket.analysis.ticket_type == "Спам":
+        return None
+
+    eligible_global = filter_managers(
+        managers=managers,
+        office=None,
+        segment=ticket.segment or "Mass",
+        ticket_type=ticket.analysis.ticket_type or "Консультация",
+        language=ticket.analysis.language or "RU",
+        sentiment=ticket.analysis.sentiment or "Нейтральный",
+        limit=None,
+    )
+    assigned_office = ticket.assignment.assigned_office
+    alternative = next(
+        (m for m in eligible_global if m.office and m.office != assigned_office),
+        None,
+    )
+    if not alternative:
+        return None
+
+    return (
+        "Клиент явно указал, что находится за пределами Казахстана. "
+        "По правилу организаторов распределение сохраняется 50/50 между Астаной и Алматы. "
+        f"Для онлайн-консультации можно рассмотреть {alternative.full_name} "
+        f"({alternative.office}, текущая нагрузка {alternative.current_load})."
+    )
+
+
+def _serialize_ticket(ticket: Ticket, managers: List[Manager]) -> TicketOut:
+    base = TicketOut.model_validate(ticket)
+    note = _build_cross_city_consultation_note(ticket, managers)
+    return base.model_copy(update={"cross_city_consultation_note": note})
 
 
 @app.on_event("startup")
@@ -100,9 +141,13 @@ def list_tickets(
     ticket_type: Optional[str] = None,
     language: Optional[str] = None,
     office: Optional[str] = None,
+    manager_id: Optional[int] = None,
     db: Session = Depends(get_db),
 ):
-    q = db.query(Ticket)
+    q = db.query(Ticket).options(
+        joinedload(Ticket.analysis),
+        joinedload(Ticket.assignment).joinedload(Assignment.manager),
+    )
     if segment:
         q = q.filter(Ticket.segment == segment)
     if ticket_type:
@@ -111,15 +156,29 @@ def list_tickets(
         q = q.join(TicketAnalysis).filter(TicketAnalysis.language == language)
     if office:
         q = q.join(Assignment).filter(Assignment.assigned_office == office)
-    return q.offset(skip).limit(limit).all()
+    if manager_id:
+        q = q.join(Assignment).filter(Assignment.manager_id == manager_id)
+
+    tickets = q.offset(skip).limit(limit).all()
+    managers = db.query(Manager).all()
+    return [_serialize_ticket(ticket, managers) for ticket in tickets]
 
 
 @app.get("/api/tickets/{ticket_id}", response_model=TicketOut)
 def get_ticket(ticket_id: int, db: Session = Depends(get_db)):
-    ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
+    ticket = (
+        db.query(Ticket)
+        .options(
+            joinedload(Ticket.analysis),
+            joinedload(Ticket.assignment).joinedload(Assignment.manager),
+        )
+        .filter(Ticket.id == ticket_id)
+        .first()
+    )
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
-    return ticket
+    managers = db.query(Manager).all()
+    return _serialize_ticket(ticket, managers)
 
 
 # ── Managers ──────────────────────────────────────────────────────────────────

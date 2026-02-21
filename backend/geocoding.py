@@ -1,17 +1,13 @@
 import math
+import os
 import time
 import difflib
-import ssl
 from typing import Optional, Tuple, List
 
-# macOS ships without trusted root certs for Python — create a permissive SSL context
-# so Nominatim HTTPS requests don't fail with CERTIFICATE_VERIFY_FAILED.
-_SSL_CTX = ssl.create_default_context()
-_SSL_CTX.check_hostname = False
-_SSL_CTX.verify_mode = ssl.CERT_NONE
+import httpx
 
 # Hardcoded coordinates for Kazakhstan cities (lat, lon)
-# Used as primary lookup before falling back to Nominatim
+# Used as primary lookup before falling back to 2GIS Geocoder API.
 KZ_CITY_COORDS: dict[str, Tuple[float, float]] = {
     "Алматы": (43.2220, 76.8512),
     "Астана": (51.1694, 71.4491),
@@ -87,7 +83,6 @@ KZ_CITY_COORDS: dict[str, Tuple[float, float]] = {
     "Магнитогорск": (53.2141, 63.6246),
     "Бурабай": (53.0667, 70.2500),
     "Щучинск": (52.9333, 70.2000),
-    "Кокшетау": (53.2837, 69.3921),
     "Карагандинская": (49.8047, 73.1094),
     "Алматинская": (43.2220, 76.8512),
     "Акмолинская": (51.1694, 71.4491),
@@ -96,7 +91,6 @@ KZ_CITY_COORDS: dict[str, Tuple[float, float]] = {
     "Восточно-Казахстанская": (49.9481, 82.6278),
     "Жамбылская": (42.9000, 71.3667),
     "Западно-Казахстанская": (51.2333, 51.3667),
-    "Карагандинская": (49.8047, 73.1094),
     "Костанайская": (53.2141, 63.6246),
     "Кызылординская": (44.8481, 65.5097),
     "Мангистауская": (43.6415, 51.1727),
@@ -104,35 +98,30 @@ KZ_CITY_COORDS: dict[str, Tuple[float, float]] = {
     "Северо-Казахстанская": (54.8694, 69.1568),
     "Туркестанская": (43.3000, 68.2667),
     "ЮКО": (42.3417, 69.5901),
-    "Мангистауская": (43.6415, 51.1727),
     "Mangystau": (43.6415, 51.1727),
-    "Актобе": (50.2797, 57.2070),
     "Абайская": (50.4111, 80.2275),
     "Улытауская": (47.8000, 67.7333),
     "Жетысуская": (45.0167, 78.3667),
     "Семипалатинская": (50.4111, 80.2275),
-    "Павлодар": (52.2979, 76.9673),
-    "Актау": (43.6415, 51.1727),
-    "Бейнеу": (45.2667, 55.1333),
 }
 
-# Coordinates for each office
+# Coordinates for each office — sourced from 2GIS API (city-level, ru_KZ locale)
 OFFICE_COORDS: dict[str, Tuple[float, float]] = {
-    "Актау": (43.6415, 51.1727),
-    "Актобе": (50.2797, 57.2070),
-    "Алматы": (43.2220, 76.8512),
-    "Астана": (51.1694, 71.4491),
-    "Атырау": (47.0945, 51.9236),
-    "Караганда": (49.8047, 73.1094),
-    "Кокшетау": (53.2837, 69.3921),
-    "Костанай": (53.2141, 63.6246),
-    "Кызылорда": (44.8481, 65.5097),
-    "Павлодар": (52.2979, 76.9673),
-    "Петропавловск": (54.8694, 69.1568),
-    "Тараз": (42.9000, 71.3667),
-    "Уральск": (51.2333, 51.3667),
-    "Усть-Каменогорск": (49.9481, 82.6278),
-    "Шымкент": (42.3417, 69.5901),
+    "Актау":            (43.6356, 51.1683),
+    "Актобе":           (50.3002, 57.1541),
+    "Алматы":           (43.2183, 76.8932),
+    "Астана":           (51.1295, 71.4431),
+    "Атырау":           (47.1180, 51.9706),
+    "Караганда":        (49.8156, 73.0833),
+    "Кокшетау":         (53.2828, 69.3786),
+    "Костанай":         (53.2146, 63.6319),
+    "Кызылорда":        (44.8249, 65.5026),
+    "Павлодар":         (52.2856, 76.9412),
+    "Петропавловск":    (54.8617, 69.1394),
+    "Тараз":            (42.8896, 71.3532),
+    "Уральск":          (51.2040, 51.3705),
+    "Усть-Каменогорск": (49.9482, 82.6280),
+    "Шымкент":          (42.3154, 69.5870),
 }
 
 
@@ -159,6 +148,67 @@ for _office_name in OFFICE_COORDS:
 
 
 # ---------------------------------------------------------------------------
+# Latin → Cyrillic alias table for Kazakhstan office cities and oblasts.
+# Covers the most common romanisation spellings found in ticket data.
+# ---------------------------------------------------------------------------
+_LATIN_TO_CYRILLIC: dict[str, str] = {
+    # Office cities
+    "aktau": "Актау",
+    "aktobe": "Актобе",
+    "aktyubinsk": "Актобе",
+    "almaty": "Алматы",
+    "alma-ata": "Алматы",
+    "almaata": "Алматы",
+    "astana": "Астана",
+    "nur-sultan": "Астана",
+    "nursultan": "Астана",
+    "atyrau": "Атырау",
+    "karaganda": "Караганда",
+    "karagandy": "Караганда",
+    "kokshetau": "Кокшетау",
+    "kokchetav": "Кокшетау",
+    "kostanay": "Костанай",
+    "kustanai": "Костанай",
+    "kyzylorda": "Кызылорда",
+    "pavlodar": "Павлодар",
+    "petropavlovsk": "Петропавловск",
+    "taraz": "Тараз",
+    "zhambyl": "Тараз",
+    "uralsk": "Уральск",
+    "oral": "Уральск",
+    "ust-kamenogorsk": "Усть-Каменогорск",
+    "ust kamenogorsk": "Усть-Каменогорск",
+    "oskemen": "Усть-Каменогорск",
+    "shymkent": "Шымкент",
+    "chimkent": "Шымкент",
+    "semey": "Семей",
+    "semipalatinsk": "Семей",
+    # Oblasts / regions
+    "akmola": "Акмолинская",
+    "akmolinsk": "Акмолинская",
+    "aktobe region": "Актюбинская",
+    "almaty region": "Алматинская",
+    "atyrau region": "Атырауская",
+    "east kazakhstan": "Восточно-Казахстанская",
+    "zhambyl region": "Жамбылская",
+    "west kazakhstan": "Западно-Казахстанская",
+    "karaganda region": "Карагандинская",
+    "kostanay region": "Костанайская",
+    "kyzylorda region": "Кызылординская",
+    "mangystau": "Мангистауская",
+    "pavlodar region": "Павлодарская",
+    "north kazakhstan": "Северо-Казахстанская",
+    "turkestan region": "Туркестанская",
+    "south kazakhstan": "Туркестанская",
+}
+
+
+def _latin_to_cyrillic(name: str) -> str:
+    """Return Cyrillic canonical name if *name* is a known Latin alias, else return as-is."""
+    return _LATIN_TO_CYRILLIC.get(name.strip().lower(), name)
+
+
+# ---------------------------------------------------------------------------
 # Fuzzy matching
 # ---------------------------------------------------------------------------
 
@@ -178,9 +228,11 @@ def fuzzy_office_city(city_name: str) -> Optional[str]:
     """
     Return the canonical office-city name that best fuzzy-matches *city_name*.
     Used by routing to resolve which office city the client belongs to.
+    Handles Latin-script input via the _LATIN_TO_CYRILLIC alias table.
     """
     if not city_name:
         return None
+    city_name = _latin_to_cyrillic(city_name)
     norm = city_name.strip().lower()
     # Exact match first
     if norm in CITY_TO_OFFICES:
@@ -195,34 +247,84 @@ def fuzzy_office_city(city_name: str) -> Optional[str]:
 
 
 # ---------------------------------------------------------------------------
-# Nominatim (OpenStreetMap) — street-level geocoding, free, no API key
-# Rate limit: ≤1 req/sec per OSM usage policy
+# 2GIS Geocoder API — street-level geocoding for CIS-style addresses.
+# Requires TWOGIS_API_KEY (or DGIS_API_KEY as fallback alias).
+# Docs: https://docs.2gis.com/en/api/search/geocoder/reference/3.0/items/geocode
 # ---------------------------------------------------------------------------
 
-_NOM_LAST_CALL: float = 0.0
-_NOM_MIN_INTERVAL: float = 1.1  # seconds between calls
+_TWOGIS_LAST_CALL: float = 0.0
+_TWOGIS_MIN_INTERVAL: float = 0.25  # seconds between calls
+_TWOGIS_MISSING_KEY_WARNED: bool = False
+_TWOGIS_ENDPOINT = "https://catalog.api.2gis.com/3.0/items/geocode"
+
+# Kazakhstan bounding box (approximate)
+_KZ_LAT_MIN, _KZ_LAT_MAX = 40.5, 55.5
+_KZ_LON_MIN, _KZ_LON_MAX = 50.2, 87.4
 
 
-def _nominatim_geocode(query: str) -> Optional[Tuple[float, float]]:
-    """Call Nominatim with built-in rate limiting. Returns (lat, lon) or None."""
-    global _NOM_LAST_CALL
+def _in_kz_bbox(lat: float, lon: float) -> bool:
+    """Return True if coordinates fall within Kazakhstan's bounding box."""
+    return _KZ_LAT_MIN <= lat <= _KZ_LAT_MAX and _KZ_LON_MIN <= lon <= _KZ_LON_MAX
+
+
+def _twogis_geocode(
+    query: str,
+    near: Optional[Tuple[float, float]] = None,
+) -> Optional[Tuple[float, float]]:
+    """Call 2GIS geocoder with lightweight rate limiting. Returns (lat, lon) or None."""
+    global _TWOGIS_LAST_CALL, _TWOGIS_MISSING_KEY_WARNED
+
+    api_key = (
+        os.getenv("TWOGIS_API_KEY")
+        or os.getenv("DGIS_API_KEY")
+        or ""
+    ).strip()
+    if not api_key:
+        if not _TWOGIS_MISSING_KEY_WARNED:
+            print("[Geocoding] 2GIS key missing: set TWOGIS_API_KEY to enable API lookup.")
+            _TWOGIS_MISSING_KEY_WARNED = True
+        return None
+
     try:
-        from geopy.geocoders import Nominatim
-        from geopy.exc import GeocoderTimedOut, GeocoderUnavailable
+        elapsed = time.monotonic() - _TWOGIS_LAST_CALL
+        if elapsed < _TWOGIS_MIN_INTERVAL:
+            time.sleep(_TWOGIS_MIN_INTERVAL - elapsed)
 
-        elapsed = time.monotonic() - _NOM_LAST_CALL
-        if elapsed < _NOM_MIN_INTERVAL:
-            time.sleep(_NOM_MIN_INTERVAL - elapsed)
+        params = {
+            "key": api_key,
+            "q": query,
+            "fields": "items.point,items.search_attributes",
+            "locale": "ru_KZ",
+        }
+        if near:
+            lat, lon = near
+            params["point"] = f"{lon},{lat}"
+            params["radius"] = 50000
 
-        geocoder = Nominatim(user_agent="fire-routing/1.0", ssl_context=_SSL_CTX)
-        location = geocoder.geocode(query, language="ru", timeout=6)
-        _NOM_LAST_CALL = time.monotonic()
+        response = httpx.get(_TWOGIS_ENDPOINT, params=params, timeout=8.0)
+        response.raise_for_status()
+        _TWOGIS_LAST_CALL = time.monotonic()
 
-        if location:
-            print(f"[Geocoding] Nominatim: '{query}' → ({location.latitude:.4f}, {location.longitude:.4f})")
-            return (location.latitude, location.longitude)
+        payload = response.json()
+        items = payload.get("result", {}).get("items", [])
+        if not items:
+            return None
+
+        first = items[0]
+        point = first.get("point", {})
+        lat = point.get("lat")
+        lon = point.get("lon")
+        if lat is None or lon is None:
+            return None
+
+        precision = first.get("search_attributes", {}).get("precision")
+        print(
+            f"[Geocoding] 2GIS (precision={precision or 'n/a'}): "
+            f"'{query}' → ({float(lat):.4f}, {float(lon):.4f})"
+        )
+        return float(lat), float(lon)
     except Exception as e:
-        print(f"[Geocoding] Nominatim error for '{query}': {e}")
+        print(f"[Geocoding] 2GIS error for '{query}': {e}")
     return None
 
 
@@ -238,56 +340,59 @@ def geocode_client(
     house: Optional[str] = None,
 ) -> Optional[Tuple[float, float]]:
     """
-    Resolve a client address to (lat, lon) using a multi-tier strategy:
+    Resolve a client location to (lat, lon) using city + region only.
+    Street/house are intentionally ignored — 2GIS with locale=ru_KZ
+    handles Kazakhstan-specific disambiguation without exact addresses.
 
-    1. Full street address via Nominatim  ← most precise; only if street given
-    2. City-only via Nominatim            ← if city isn't in hardcoded map
-    3. Direct lookup in KZ_CITY_COORDS   ← instant; covers all known KZ cities
-    4. Fuzzy city lookup                 ← handles typos (1-2 char errors)
-    5. Direct region lookup              ← fallback to region centroid
-    6. Fuzzy region lookup
-    7. Partial substring match           ← legacy catch-all
+    Strategy:
+    1. 2GIS: city + region + Казахстан  — primary; ru_KZ locale pins to KZ
+       Result validated against KZ bounding box (rejects out-of-KZ hits).
+    2. 2GIS: region + Казахстан         — if no city or city lookup failed
+       Also bbox-validated.
+    3. KZ_CITY_COORDS direct region     — hardcoded fallback (no key / timeout)
+    4. KZ_CITY_COORDS fuzzy region      — typo-tolerant hardcoded fallback
+    5. Partial substring match on region — last resort
     """
-    # 1. Street-level Nominatim (most precise when street is available)
-    if street:
-        parts = [p for p in [street, house, city, region, "Казахстан"] if p]
-        coords = _nominatim_geocode(", ".join(parts))
-        if coords:
+    _ = street, house  # kept for backward compatibility; intentionally unused
+
+    # Normalise Latin-script input to Cyrillic before any lookup
+    if city:
+        city = _latin_to_cyrillic(city)
+    if region:
+        region = _latin_to_cyrillic(region)
+
+    # 1. 2GIS — city + region (most precise)
+    if city:
+        parts = [p for p in [city, region, "Казахстан"] if p]
+        coords = _twogis_geocode(", ".join(parts))
+        if coords and _in_kz_bbox(*coords):
             return coords
+        if coords:
+            print(f"[Geocoding] 2GIS result outside KZ bbox for '{', '.join(parts)}' — skipping")
 
-    # 2. Direct city lookup
-    if city and city in KZ_CITY_COORDS:
-        return KZ_CITY_COORDS[city]
+    # 2. 2GIS — region only (if no city, or city lookup failed)
+    if region:
+        parts = [p for p in [region, "Казахстан"] if p]
+        coords = _twogis_geocode(", ".join(parts))
+        if coords and _in_kz_bbox(*coords):
+            return coords
+        if coords:
+            print(f"[Geocoding] 2GIS result outside KZ bbox for '{', '.join(parts)}' — skipping")
 
-    # 3. Direct region lookup
+    # 3. KZ_CITY_COORDS direct region lookup — hardcoded fallback (no API key / timeout)
     if region and region in KZ_CITY_COORDS:
         return KZ_CITY_COORDS[region]
 
-    # 4. Fuzzy city lookup (typo-tolerant)
-    if city:
-        coords = _fuzzy_city_lookup(city)
-        if coords:
-            return coords
-
-    # 5. Fuzzy region lookup
+    # 4. KZ_CITY_COORDS fuzzy region lookup — typo-tolerant hardcoded fallback
     if region:
         coords = _fuzzy_city_lookup(region)
         if coords:
             return coords
 
-    # 6. City-only Nominatim (unknown city not in hardcoded map)
-    if city:
-        parts = [p for p in [city, region, "Казахстан"] if p]
-        coords = _nominatim_geocode(", ".join(parts))
-        if coords:
-            return coords
-
-    # 7. Partial substring match (legacy fallback)
-    for candidate in [city, region]:
-        if not candidate:
-            continue
+    # 5. Partial substring match on region — last resort
+    if region:
         for key, coords in KZ_CITY_COORDS.items():
-            if key.lower() in candidate.lower() or candidate.lower() in key.lower():
+            if key.lower() in region.lower() or region.lower() in key.lower():
                 return coords
 
     return None
@@ -311,7 +416,18 @@ def find_sorted_offices(client_lat: float, client_lon: float) -> list:
 
 
 def is_foreign(country: Optional[str]) -> bool:
-    """Return True if the client is not from Kazakhstan."""
+    """
+    Return True only when the country field explicitly names a non-KZ country.
+
+    Returns False (treat as domestic) when:
+    - country is empty/None  (missing data — fall through to geocoding)
+    - country is a recognised KZ spelling ("Казахстан", "Kazakhstan", "KZ", "Қазақстан")
+
+    Any other non-empty value (e.g. "Russia", "UAE") is treated as foreign.
+    KZ city/region names mistakenly placed in the country field are handled
+    downstream: geocode_client() ignores the country field and uses only
+    city/region, so those tickets still route correctly.
+    """
     if not country:
         return False
     kz_variants = {"казахстан", "kazakhstan", "kz", "қазақстан"}

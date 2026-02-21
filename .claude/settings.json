@@ -26,7 +26,8 @@
       "WebFetch(domain:platform.openai.com)",
       "WebFetch(domain:developers.openai.com)",
       "WebFetch(domain:www.prompthub.us)",
-      "Bash(python -c:*)"
+      "Bash(python -c:*)",
+      "WebFetch(domain:docs.2gis.com)"
     ],
     "additionalDirectories": [
       "/tmp"

@@ -29,6 +29,7 @@ interface Message {
 function ChartBlock({ type, data }: { type: string; data: any }) {
   if (!data?.labels?.length) return null;
   const chartData = data.labels.map((l: string, i: number) => ({ name: l, value: data.values[i] ?? 0 }));
+  const barChartData = [...chartData].sort((a, b) => b.value - a.value);
 
   return (
     <div className="mt-3 bg-gray-950 rounded-lg p-4 border border-gray-800">
@@ -50,12 +51,12 @@ function ChartBlock({ type, data }: { type: string; data: any }) {
             <Line type="monotone" dataKey="value" stroke="#3b82f6" strokeWidth={2} dot={false} />
           </LineChart>
         ) : (
-          <BarChart data={chartData}>
+          <BarChart data={barChartData}>
             <XAxis dataKey="name" tick={{ fill: "#6b7280", fontSize: 10 }} angle={-20} textAnchor="end" height={40} />
             <YAxis tick={{ fill: "#6b7280", fontSize: 11 }} />
             <Tooltip contentStyle={{ background: "#1f2937", border: "1px solid #374151", borderRadius: 8 }} />
             <Bar dataKey="value" radius={[4, 4, 0, 0]}>
-              {chartData.map((_: any, i: number) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+              {barChartData.map((_: any, i: number) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
             </Bar>
           </BarChart>
         )}

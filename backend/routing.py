@@ -1,7 +1,8 @@
+import re
 from typing import List, Optional, Tuple
 from models import Manager
 from geocoding import (
-    geocode_client, find_nearest_office, find_sorted_offices,
+    geocode_client, find_sorted_offices,
     fuzzy_office_city, CITY_TO_OFFICES, is_foreign,
 )
 
@@ -12,6 +13,42 @@ _foreign_counter: list[int] = [0]  # mutable int for 50/50 Astana/Almaty split
 # Distance threshold (km) within which two offices are considered "equidistant"
 # and tie-breaking by manager load applies.
 EQUIDISTANT_THRESHOLD_KM = 50.0
+
+# Explicit abroad-location hints in ticket text.
+# Used for UI guidance only; routing remains governed by core rules.
+FOREIGN_LOCATION_HINTS = [
+    "за границ",
+    "в другой стране",
+    "не в казахстане",
+    "нахожусь не в казахстане",
+    "outside kazakhstan",
+    "abroad",
+    "overseas",
+]
+FOREIGN_COUNTRY_ALIASES = [
+    "росси", "russia",
+    "турци", "turkey",
+    "оаэ", "uae", "emirates", "dubai", "дуба",
+    "сша", "usa", "united states", "america",
+    "канада", "canada",
+    "герман", "germany",
+    "великобрит", "united kingdom", "uk",
+    "кыргыз", "kyrgyz",
+    "узбекистан", "uzbekistan",
+    "таджикистан", "tajikistan",
+    "азербайджан", "azerbaijan",
+    "грузи", "georgia",
+    "армени", "armenia",
+    "кита", "china",
+    "коре", "korea",
+    "япони", "japan",
+]
+CURRENT_LOCATION_PATTERN = re.compile(
+    r"(?:нахожусь|сейчас|временно|пребываю|currently|temporarily|right now)"
+    r"(?:\s+\w+){0,3}\s+(?:в|in)\s+([^\n,.;:!?]{2,40})",
+    flags=re.IGNORECASE,
+)
+KAZAKHSTAN_TOKENS = ("казахстан", "қазақстан", "kazakhstan")
 
 
 def reset_counters():
@@ -47,6 +84,28 @@ def _office_load(managers: List[Manager], office: str) -> int:
     return sum(m.current_load for m in managers if m.office == office)
 
 
+def has_explicit_foreign_location(description: Optional[str]) -> bool:
+    """
+    Detect whether the client explicitly states they are currently abroad.
+    This is intentionally conservative: it only triggers on explicit hints.
+    """
+    if not description:
+        return False
+
+    text = description.lower()
+    if any(hint in text for hint in FOREIGN_LOCATION_HINTS):
+        return True
+
+    for match in CURRENT_LOCATION_PATTERN.finditer(text):
+        location = match.group(1).strip()
+        if any(token in location for token in KAZAKHSTAN_TOKENS):
+            continue
+        if any(alias in location for alias in FOREIGN_COUNTRY_ALIASES):
+            return True
+
+    return False
+
+
 def get_target_office(
     country: Optional[str],
     city: Optional[str],
@@ -60,10 +119,11 @@ def get_target_office(
     Returns (office_name, client_lat, client_lon).
 
     Selection strategy:
-    1. Foreign / unknown country → 50/50 Астана / Алматы
-    2. City maps to exactly ONE office (direct or fuzzy match) AND no precise
-       street address → assign that office immediately; no distance calculation.
-    3. Street address provided OR city has multiple offices in its area →
+    1. Explicitly foreign country → 50/50 Астана / Алматы
+       (missing/empty country falls through to geocoding, not this branch)
+    2. City maps to exactly ONE office (direct or fuzzy match) →
+       assign that office immediately; no distance calculation.
+    3. Otherwise →
        geocode to precise coordinates, then:
        a. If the nearest two offices are within EQUIDISTANT_THRESHOLD_KM →
           tie-break by total manager load (lower load wins).
@@ -71,16 +131,18 @@ def get_target_office(
     """
     foreign = is_foreign(country)
 
-    if foreign or not country:
+    # Explicitly foreign country → split 50/50 Астана/Алматы immediately.
+    # Missing/empty country is NOT treated as foreign — we still try geocoding
+    # by city/region, and only fall back to Астана/Алматы if that also fails.
+    if foreign:
         idx = _foreign_counter[0] % 2
         _foreign_counter[0] += 1
         return ("Астана" if idx == 0 else "Алматы"), None, None
 
-    # --- Single-office shortcut (no street needed) ---------------------------
+    # --- Single-office shortcut ------------------------------------------------
     # If the client's city fuzzy-matches to a city that has exactly one office,
-    # we can skip coordinate lookup entirely.  Street addresses bypass this so
-    # we still get precise lat/lon for storage and multi-office scenarios.
-    if city and not street:
+    # we can skip coordinate lookup entirely.
+    if city:
         matched_office = fuzzy_office_city(city)
         if matched_office:
             offices_in_city = CITY_TO_OFFICES.get(matched_office.strip().lower(), [])
@@ -92,7 +154,7 @@ def get_target_office(
                 return matched_office, lat, lon
 
     # --- Coordinate-based selection (precise or multi-office) ----------------
-    coords = geocode_client(city, region, country, street=street, house=house)
+    coords = geocode_client(city, region, country)
 
     if coords is None:
         idx = _foreign_counter[0] % 2
@@ -115,11 +177,12 @@ def get_target_office(
 
 def filter_managers(
     managers: List[Manager],
-    office: str,
+    office: Optional[str],
     segment: str,
     ticket_type: str,
     language: str,
     sentiment: str = "Нейтральный",
+    limit: Optional[int] = 2,
 ) -> List[Manager]:
     """
     Apply skill/competency filters to managers at the target office.
@@ -135,7 +198,10 @@ def filter_managers(
     - Негативный sentiment  → prefer Ведущий специалист or Главный специалист
       Falls through to the full eligible pool if no senior is available.
     """
-    pool = [m for m in managers if m.office == office]
+    if office:
+        pool = [m for m in managers if m.office == office]
+    else:
+        pool = [m for m in managers if m.office]
 
     # Hard filter: VIP or Priority segment
     if segment in ("VIP", "Priority"):
@@ -165,7 +231,9 @@ def filter_managers(
         if senior_pool:
             pool = senior_pool
 
-    return pool[:2]
+    if limit is None:
+        return pool
+    return pool[:limit]
 
 
 def assign_manager(
