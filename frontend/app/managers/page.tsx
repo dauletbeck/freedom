@@ -3,6 +3,25 @@
 import { useEffect, useState } from "react";
 import clsx from "clsx";
 
+function LoadBar({ total, assigned, prior }: { total: number; assigned: number; prior: number }) {
+  const CAP = Math.max(total, 10);
+  const priorPct = Math.min(100, (prior / CAP) * 100);
+  const assignedPct = Math.min(100 - priorPct, (assigned / CAP) * 100);
+  const barColor = total >= 8 ? "bg-red-500" : total >= 5 ? "bg-orange-500" : "bg-green-500";
+  return (
+    <div className="flex items-center gap-2">
+      <div className="w-24 bg-gray-800 rounded-full h-1.5 overflow-hidden flex">
+        <div className="bg-gray-600 h-1.5 shrink-0" style={{ width: `${priorPct}%` }} title={`До пайплайна: ${prior}`} />
+        <div className={clsx("h-1.5 shrink-0", barColor)} style={{ width: `${assignedPct}%` }} title={`Назначено: ${assigned}`} />
+      </div>
+      <span className="text-gray-300 text-xs" title={`До: ${prior} + Назначено: ${assigned}`}>
+        {total}
+        {assigned > 0 && <span className="text-gray-500"> (+{assigned})</span>}
+      </span>
+    </div>
+  );
+}
+
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 const POSITION_COLOR: Record<string, string> = {
@@ -92,19 +111,7 @@ export default function ManagersPage() {
                       </div>
                     </td>
                     <td className="px-5 py-2.5">
-                      <div className="flex items-center gap-2">
-                        <div className="w-24 bg-gray-800 rounded-full h-1.5">
-                          <div
-                            className={clsx("h-1.5 rounded-full", {
-                              "bg-red-500": m.current_load >= 8,
-                              "bg-orange-500": m.current_load >= 5,
-                              "bg-green-500": m.current_load < 5,
-                            })}
-                            style={{ width: `${Math.min(100, (m.current_load / 10) * 100)}%` }}
-                          />
-                        </div>
-                        <span className="text-gray-300 text-xs">{m.current_load}</span>
-                      </div>
+                      <LoadBar total={m.current_load} assigned={m.assigned_count} prior={m.prior_load} />
                     </td>
                   </tr>
                 ))}

@@ -124,12 +124,31 @@ def get_ticket(ticket_id: int, db: Session = Depends(get_db)):
 
 # ── Managers ──────────────────────────────────────────────────────────────────
 
-@app.get("/api/managers", response_model=List[ManagerOut])
+@app.get("/api/managers")
 def list_managers(office: Optional[str] = None, db: Session = Depends(get_db)):
     q = db.query(Manager)
     if office:
         q = q.filter(Manager.office == office)
-    return q.order_by(Manager.office, Manager.current_load).all()
+    managers = q.order_by(Manager.office, Manager.current_load).all()
+
+    assigned_counts = dict(
+        db.query(Assignment.manager_id, func.count(Assignment.id))
+        .group_by(Assignment.manager_id)
+        .all()
+    )
+    return [
+        {
+            "id": m.id,
+            "full_name": m.full_name,
+            "position": m.position,
+            "office": m.office,
+            "skills": m.skills or [],
+            "current_load": m.current_load,
+            "assigned_count": assigned_counts.get(m.id, 0),
+            "prior_load": m.current_load - assigned_counts.get(m.id, 0),
+        }
+        for m in managers
+    ]
 
 
 # ── Business Units ────────────────────────────────────────────────────────────
@@ -169,7 +188,12 @@ def get_stats(db: Session = Depends(get_db)):
     avg_priority_row = db.query(func.avg(TicketAnalysis.priority_score)).scalar()
     avg_priority = round(float(avg_priority_row or 0), 2)
 
-    # Manager loads
+    # Manager loads — split into prior (from CSV) and assigned (this pipeline run)
+    assigned_counts = dict(
+        db.query(Assignment.manager_id, func.count(Assignment.id))
+        .group_by(Assignment.manager_id)
+        .all()
+    )
     managers = db.query(Manager).order_by(Manager.current_load.desc()).all()
     manager_loads = [
         {
@@ -177,8 +201,10 @@ def get_stats(db: Session = Depends(get_db)):
             "name": m.full_name,
             "office": m.office,
             "position": m.position,
-            "skills": m.skills,
+            "skills": m.skills or [],
             "load": m.current_load,
+            "assigned_count": assigned_counts.get(m.id, 0),
+            "prior_load": m.current_load - assigned_counts.get(m.id, 0),
         }
         for m in managers
     ]

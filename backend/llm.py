@@ -179,16 +179,16 @@ Choose exactly one value for "sentiment":
 </sentiment>
 
 <language>
-Detect the language of the ticket text. Use exactly one of: "KZ", "ENG", "RU".
+Identify the language of the ticket text. Write the full language name in English (e.g., "Russian", "Kazakh", "English", "Uzbek", "Azerbaijani", "Tajik", etc.).
 
-- "KZ"  — the text is in the Kazakh language, written in EITHER:
-           • Kazakh Cyrillic (distinctive letters: ә, і, ң, ғ, ү, ұ, қ, ө, һ), OR
-           • Kazakh Latin (official 2021 alphabet — you recognise it by Kazakh vocabulary and grammar even without Cyrillic letters).
-           Do NOT use "KZ" for Azerbaijani or Uzbek, even though they are also Turkic languages.
-- "ENG" — the text is predominantly English.
-- "RU"  — use for Russian, Azerbaijani, Uzbek, or any other language.
-           Azerbaijani clues: dotless ı, ə, words like "salam", "xahiş".
-           Uzbek clues: ʻ (as in oʻ / gʻ), words like "salom", "iltimos".
+- Kazakh: Cyrillic with ә, і, ң, ғ, ү, ұ, қ, ө, һ — OR rarely Kazakh Latin recognised by Kazakh vocabulary/grammar.
+- Uzbek: Latin with ʻ (oʻ, gʻ), or Cyrillic with Ҷ/Ӯ, or words like "salom", "iltimos", "ruyxat", "utolmayapman".
+  Example: "Men ruyxatdan utolmayapman" → Uzbek.
+- Azerbaijani: Latin with dotless ı, ə, words like "salam", "xahiş".
+- English: predominantly English text.
+- Russian: Russian text or any unidentified language.
+
+Do not constrain yourself to a fixed list — name the language you actually detect.
 </language>
 
 <priority>
@@ -243,6 +243,21 @@ def _infer_language(description: str) -> str:
         # Kazakh Latin (2021 alphabet) has no single unique character; the LLM handles this
         # edge case via the updated system prompt.  Fall through to ENG so the LLM can
         # override the language field with "KZ" when it recognises Kazakh Latin content.
+        return "ENG"
+    return "RU"
+
+
+def _normalize_language(lang: str) -> str:
+    """Map a free-form language name from the LLM to a routing code.
+
+    Only "KZ" and "ENG" have special routing rules (skill requirements).
+    Anything else — Russian, Uzbek, Azerbaijani, Tajik, unknown — routes as "RU"
+    because all managers are assumed to speak Russian.
+    """
+    lower = (lang or "").strip().lower()
+    if lower in {"kazakh", "kz", "казахский", "kazak", "qazaq", "қазақша"}:
+        return "KZ"
+    if lower in {"english", "eng", "en", "английский"}:
         return "ENG"
     return "RU"
 
@@ -373,10 +388,7 @@ TICKET_RESPONSE_FORMAT = {
                 "priority": {
                     "anyOf": [{"type": "integer"}, {"type": "null"}],
                 },
-                "language": {
-                    "type": "string",
-                    "enum": ["RU", "KZ", "ENG"],
-                },
+                "language": {"type": "string"},
                 "summary": {"type": "string"},
                 "recommendation": {"type": "string"},
             },
@@ -601,19 +613,8 @@ Description:
                 f"Empty response from LLM — finish_reason={choice.finish_reason!r}, refusal={refusal!r}"
             )
         result = json.loads(content)
+        result["language"] = _normalize_language(result.get("language", ""))
         result["analysis_engine"] = f"llm:{MODEL}"
-
-        # Extract token usage — reasoning models expose reasoning_tokens separately.
-        usage = response.usage
-        if usage:
-            details = getattr(usage, "completion_tokens_details", None)
-            reasoning_tokens = getattr(details, "reasoning_tokens", 0) or 0
-            result["_tokens"] = {
-                "prompt": usage.prompt_tokens,
-                "reasoning": reasoning_tokens,
-                "output": usage.completion_tokens - reasoning_tokens,
-                "total": usage.total_tokens,
-            }
 
     except Exception as llm_err:
         print(f"[LLM] Fast-path error: {llm_err}. Returning deterministic fallback.")
@@ -630,14 +631,11 @@ Description:
     # Validate and sanitize required fields
     valid_types = set(TICKET_TYPES)
     valid_sentiments = {"Позитивный", "Нейтральный", "Негативный"}
-    valid_langs = {"RU", "KZ", "ENG"}
 
     if result.get("ticket_type") not in valid_types:
         result["ticket_type"] = "Консультация"
     if result.get("sentiment") not in valid_sentiments:
         result["sentiment"] = "Нейтральный"
-    if result.get("language") not in valid_langs:
-        result["language"] = "RU"
     if result.get("ticket_type") == "Спам":
         result["priority"] = None
         result["sentiment"] = "Нейтральный"

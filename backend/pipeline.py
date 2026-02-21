@@ -309,9 +309,6 @@ def run_pipeline(progress_callback=None):
             "ticket_total": [],
         }
         analysis_engine_counts: dict[str, int] = {}
-        token_totals: dict[str, int] = {"prompt": 0, "reasoning": 0, "output": 0, "total": 0}
-        # Per-ticket reasoning token samples — used to find the most ambiguous tickets.
-        reasoning_samples: list[tuple[int, str]] = []  # (reasoning_tokens, guid)
 
         for i, ticket in enumerate(pending_tickets):
             if progress_callback:
@@ -355,13 +352,6 @@ def run_pipeline(progress_callback=None):
             llm_time = perf_counter() - stage_started_at
             timing_samples["llm"].append(llm_time)
             analysis_engine = result.get("analysis_engine", "llm:unknown")
-
-            # Accumulate token metrics (only present on real LLM calls, not heuristic fallbacks).
-            tok = result.pop("_tokens", None)
-            if tok:
-                for k in token_totals:
-                    token_totals[k] += tok.get(k, 0)
-                reasoning_samples.append((tok["reasoning"], ticket.guid))
             analysis_engine_counts[analysis_engine] = analysis_engine_counts.get(analysis_engine, 0) + 1
             is_spam = result.get("ticket_type") == "Спам"
 
@@ -425,10 +415,6 @@ def run_pipeline(progress_callback=None):
             total_ticket_time = perf_counter() - ticket_started_at
             timing_samples["ticket_total"].append(total_ticket_time)
 
-            tok_str = (
-                f"prompt={tok['prompt']} reasoning={tok['reasoning']} output={tok['output']}"
-                if tok else "tokens=n/a"
-            )
             print(
                 f"[Pipeline][Timing] ticket={ticket.guid[:8]} "
                 f"attachment={attachment_time:.3f}s "
@@ -436,7 +422,7 @@ def run_pipeline(progress_callback=None):
                 f"routing={routing_time:.3f}s "
                 f"persist={persist_time:.3f}s "
                 f"total={total_ticket_time:.3f}s "
-                f"engine={analysis_engine} {tok_str}"
+                f"engine={analysis_engine}"
             )
             if is_spam:
                 print(f"[Pipeline]   Spam policy: no manager assignment, priority=None.")

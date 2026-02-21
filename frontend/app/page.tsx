@@ -183,13 +183,22 @@ export default function Dashboard() {
                       </td>
                       <td className="py-2">
                         <div className="flex items-center gap-2">
-                          <div className="w-20 bg-gray-800 rounded-full h-1.5">
+                          <div className="w-20 bg-gray-800 rounded-full h-1.5 overflow-hidden flex">
                             <div
-                              className="bg-blue-500 h-1.5 rounded-full"
-                              style={{ width: `${Math.min(100, (m.load / 10) * 100)}%` }}
+                              className="bg-gray-600 h-1.5 shrink-0"
+                              style={{ width: `${Math.min(100, (m.prior_load / Math.max(m.load, 10)) * 100)}%` }}
+                              title={`До пайплайна: ${m.prior_load}`}
+                            />
+                            <div
+                              className="bg-blue-500 h-1.5 shrink-0"
+                              style={{ width: `${Math.min(100, (m.assigned_count / Math.max(m.load, 10)) * 100)}%` }}
+                              title={`Назначено: ${m.assigned_count}`}
                             />
                           </div>
-                          <span className="text-gray-300">{m.load}</span>
+                          <span className="text-gray-300" title={`До: ${m.prior_load ?? 0} + Назначено: ${m.assigned_count ?? 0}`}>
+                            {m.load}
+                            {m.assigned_count > 0 && <span className="text-gray-500 text-xs"> (+{m.assigned_count})</span>}
+                          </span>
                         </div>
                       </td>
                     </tr>
