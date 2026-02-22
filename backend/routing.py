@@ -147,9 +147,10 @@ def get_target_office(
         if matched_office:
             offices_in_city = CITY_TO_OFFICES.get(matched_office.strip().lower(), [])
             if len(offices_in_city) == 1:
-                # Fetch coords for DB storage (instant dict lookup, no API call)
-                from geocoding import KZ_CITY_COORDS
-                coords = KZ_CITY_COORDS.get(matched_office)
+                # Fetch coords for DB storage — prefer OFFICE_COORDS (always has
+                # entries for every office city), fall back to KZ_CITY_COORDS.
+                from geocoding import KZ_CITY_COORDS, OFFICE_COORDS as _OFFICE_COORDS
+                coords = _OFFICE_COORDS.get(matched_office) or KZ_CITY_COORDS.get(matched_office)
                 lat, lon = coords if coords else (None, None)
                 return matched_office, lat, lon
 

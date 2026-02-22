@@ -9,6 +9,7 @@ import os
 import csv
 import uuid
 import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Optional
 from time import perf_counter
@@ -19,7 +20,7 @@ from sqlalchemy.orm import Session
 from database import SessionLocal, init_db
 from models import BusinessUnit, Manager, Ticket, TicketAnalysis, Assignment
 from llm import analyze_ticket, get_attachment_context
-from geocoding import OFFICE_COORDS
+from geocoding import OFFICE_COORDS, find_nearest_office, haversine
 from routing import reset_counters, route_ticket
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
@@ -67,6 +68,24 @@ def _normalize_expected_language(label_value: str | None) -> str | None:
     if not raw or raw == "nan":
         return None
     return LANGUAGE_LABEL_MAP.get(raw)
+
+
+def _ensure_summary_and_recommendation_fields(result: dict) -> None:
+    summary = result.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        result["summary"] = (
+            "Обращение содержит недостаточно понятную информацию; требуется уточнение деталей запроса."
+        )
+    else:
+        result["summary"] = summary.strip()
+
+    recommendation = result.get("recommendation")
+    if not isinstance(recommendation, str) or not recommendation.strip():
+        result["recommendation"] = (
+            "Связаться с клиентом для уточнения сути проблемы и необходимых данных."
+        )
+    else:
+        result["recommendation"] = recommendation.strip()
 
 
 def log_accuracy_from_labels(db: Session):
@@ -228,7 +247,7 @@ def load_managers(db: Session):
 
 def load_tickets(db: Session):
     """Load tickets.csv into DB."""
-    path = os.path.join(DATA_DIR, "tickets.csv")
+    path = os.path.join(DATA_DIR, "tickets_eval.csv")
     df = pd.read_csv(path, dtype=str)
     df.columns = [c.strip() for c in df.columns]
 
@@ -274,6 +293,54 @@ def _clean(val) -> Optional[str]:
     return s if s and s.lower() != "nan" else None
 
 
+# Number of concurrent OpenAI API calls during the LLM phase.
+# Increase if your API tier allows higher concurrency; decrease if you hit rate limits.
+MAX_PARALLEL_LLM = 5
+
+
+def _llm_phase(ticket: Ticket, data_dir: str) -> dict:
+    """
+    Run attachment context + LLM analysis for a single ticket.
+    Pure I/O — no shared state, safe to call from multiple threads simultaneously.
+    Returns a dict with attachment_ctx, result, attachment_time, llm_time.
+    """
+    t0 = perf_counter()
+    attachment_ctx = get_attachment_context(
+        attachment_filename=ticket.attachment,
+        description=ticket.description,
+        data_dir=data_dir,
+    )
+    attachment_time = perf_counter() - t0
+
+    t0 = perf_counter()
+    try:
+        result = analyze_ticket(
+            description=ticket.description or "",
+            segment=ticket.segment or "Mass",
+            country=ticket.country or "",
+            attachment_context=attachment_ctx,
+        )
+    except Exception as e:
+        print(f"[Pipeline] LLM error for {ticket.guid}: {e}")
+        result = {
+            "ticket_type": "Консультация",
+            "sentiment": "Нейтральный",
+            "priority": 5,
+            "language": "RU",
+            "summary": "Ошибка анализа ИИ.",
+            "recommendation": "Требуется ручная обработка.",
+            "analysis_engine": "fallback:pipeline_exception",
+        }
+    llm_time = perf_counter() - t0
+
+    return {
+        "attachment_ctx": attachment_ctx,
+        "result": result,
+        "attachment_time": attachment_time,
+        "llm_time": llm_time,
+    }
+
+
 def run_pipeline(progress_callback=None):
     """
     Full pipeline:
@@ -311,49 +378,69 @@ def run_pipeline(progress_callback=None):
         }
         analysis_engine_counts: dict[str, int] = {}
 
+        # ── Phase 1: Parallel LLM analysis ──────────────────────────────────
+        # Attachment context and LLM calls are pure network I/O with no shared
+        # mutable state, so they can safely run concurrently.
+        # Routing and DB writes stay sequential (Phase 2) to protect round-robin
+        # counters, manager load increments, and the 2GIS rate limiter.
+        print(f"[Pipeline] Phase 1 — parallel LLM analysis ({MAX_PARALLEL_LLM} workers, {total} tickets)...")
+        llm_phase_start = perf_counter()
+        llm_outputs: dict[int, dict] = {}
+
+        with ThreadPoolExecutor(max_workers=MAX_PARALLEL_LLM) as executor:
+            futures = {
+                executor.submit(_llm_phase, ticket, DATA_DIR): ticket
+                for ticket in pending_tickets
+            }
+            completed = 0
+            for future in as_completed(futures):
+                ticket = futures[future]
+                completed += 1
+                try:
+                    llm_outputs[ticket.id] = future.result()
+                except Exception as exc:
+                    print(f"[Pipeline] Unexpected executor error for {ticket.guid}: {exc}")
+                    llm_outputs[ticket.id] = {
+                        "attachment_ctx": None,
+                        "result": {
+                            "ticket_type": "Консультация",
+                            "sentiment": "Нейтральный",
+                            "priority": 5,
+                            "language": "RU",
+                            "summary": "Ошибка анализа ИИ.",
+                            "recommendation": "Требуется ручная обработка.",
+                            "analysis_engine": "fallback:executor_exception",
+                        },
+                        "attachment_time": 0.0,
+                        "llm_time": 0.0,
+                    }
+                print(f"[Pipeline] LLM {completed}/{total}: {ticket.guid[:8]} done")
+
+        print(f"[Pipeline] Phase 1 complete in {perf_counter() - llm_phase_start:.1f}s")
+
+        # ── Phase 2: Sequential routing + persist ────────────────────────────
+        # Uses pre-computed LLM results; processes tickets in original DB order
+        # so round-robin assignments remain deterministic.
+        print(f"[Pipeline] Phase 2 — routing + persist ({total} tickets)...")
         for i, ticket in enumerate(pending_tickets):
             if progress_callback:
                 progress_callback(i, total, ticket.guid)
 
-            print(f"[Pipeline] Analyzing ticket {i+1}/{total}: {ticket.guid}")
-            ticket_started_at = perf_counter()
-            stage_started_at = perf_counter()
+            out = llm_outputs[ticket.id]
+            attachment_ctx = out["attachment_ctx"]
+            result = out["result"]
+            attachment_time = out["attachment_time"]
+            llm_time = out["llm_time"]
 
-            # 1a. Attachment processing (vision or missing-attachment detection)
-            attachment_ctx = get_attachment_context(
-                attachment_filename=ticket.attachment,
-                description=ticket.description,
-                data_dir=DATA_DIR,
-            )
-            attachment_time = perf_counter() - stage_started_at
             timing_samples["attachment"].append(attachment_time)
-            if attachment_ctx:
-                print(f"[Pipeline]   Attachment: {attachment_ctx[:80]}...")
-
-            # 1b. LLM analysis (text + optional attachment context)
-            stage_started_at = perf_counter()
-            try:
-                result = analyze_ticket(
-                    description=ticket.description or "",
-                    segment=ticket.segment or "Mass",
-                    country=ticket.country or "",
-                    attachment_context=attachment_ctx,
-                )
-            except Exception as e:
-                print(f"[Pipeline] LLM error for {ticket.guid}: {e}")
-                result = {
-                    "ticket_type": "Консультация",
-                    "sentiment": "Нейтральный",
-                    "priority": 5,
-                    "language": "RU",
-                    "summary": "Ошибка анализа ИИ.",
-                    "recommendation": "Требуется ручная обработка.",
-                    "analysis_engine": "fallback:pipeline_exception",
-                }
-            llm_time = perf_counter() - stage_started_at
             timing_samples["llm"].append(llm_time)
+            if attachment_ctx:
+                print(f"[Pipeline]   Attachment ({ticket.guid[:8]}): {attachment_ctx[:80]}...")
+
+            ticket_started_at = perf_counter()
             analysis_engine = result.get("analysis_engine", "llm:unknown")
             analysis_engine_counts[analysis_engine] = analysis_engine_counts.get(analysis_engine, 0) + 1
+            _ensure_summary_and_recommendation_fields(result)
             is_spam = result.get("ticket_type") == "Спам"
 
             if is_spam:
@@ -382,6 +469,20 @@ def run_pipeline(progress_callback=None):
             timing_samples["routing"].append(routing_time)
 
             # 3. Persist analysis
+            # Pre-compute distances so the API can serve them without re-running Haversine.
+            geo_nearest = None
+            dist_to_nearest = None
+            dist_to_assigned = None
+            if lat is not None and lon is not None:
+                geo_nearest = find_nearest_office(lat, lon)
+                geo_nearest_coords = OFFICE_COORDS.get(geo_nearest)
+                if geo_nearest_coords:
+                    dist_to_nearest = haversine(lat, lon, geo_nearest_coords[0], geo_nearest_coords[1])
+                if office:
+                    assigned_coords = OFFICE_COORDS.get(office)
+                    if assigned_coords:
+                        dist_to_assigned = haversine(lat, lon, assigned_coords[0], assigned_coords[1])
+
             stage_started_at = perf_counter()
             analysis = TicketAnalysis(
                 ticket_id=ticket.id,
@@ -394,6 +495,9 @@ def run_pipeline(progress_callback=None):
                 client_lat=lat,
                 client_lon=lon,
                 nearest_office=office,
+                geo_nearest_office=geo_nearest,
+                dist_to_nearest_km=dist_to_nearest,
+                dist_to_assigned_km=dist_to_assigned,
                 attachment_description=attachment_ctx,
             )
             db.add(analysis)
@@ -411,7 +515,6 @@ def run_pipeline(progress_callback=None):
 
             db.commit()
             persist_time = perf_counter() - stage_started_at
-            timing_samples["persist"].append(persist_time)
 
             total_ticket_time = perf_counter() - ticket_started_at
             timing_samples["ticket_total"].append(total_ticket_time)
@@ -422,7 +525,6 @@ def run_pipeline(progress_callback=None):
                 f"llm={llm_time:.3f}s "
                 f"routing={routing_time:.3f}s "
                 f"persist={persist_time:.3f}s "
-                f"total={total_ticket_time:.3f}s "
                 f"engine={analysis_engine}"
             )
             if is_spam:

@@ -287,6 +287,48 @@ def _compute_priority(
     return max(1, min(10, priority))
 
 
+def _default_summary(description: str, attachment_context: str | None = None) -> str:
+    summary_parts = []
+    if description and description.strip():
+        summary_parts.append(_truncate_text(description.replace("\n", " ").strip(), 180))
+    else:
+        summary_parts.append("Текст обращения отсутствует.")
+    if attachment_context:
+        summary_parts.append("Есть вложение со скриншотом.")
+    return " ".join(summary_parts)
+
+
+def _default_recommendation(ticket_type: str) -> str:
+    recommendation_map = {
+        "Спам": "Закрыть как спам и не передавать в работу менеджеру.",
+        "Мошеннические действия": "Срочно эскалировать в антифрод и временно ограничить рисковые операции.",
+        "Неработоспособность приложения": "Передать в техподдержку приложения и проверить логи авторизации/операций.",
+        "Смена данных": "Запросить подтверждающие документы и провести обновление данных клиента.",
+        "Претензия": "Передать старшему менеджеру для официального ответа и проверки оснований требований.",
+        "Жалоба": "Проверить ситуацию по счету и подготовить клиенту разъяснение/решение.",
+        "Консультация": "Дать клиенту инструкцию и уточнить детали запроса при необходимости.",
+    }
+    return recommendation_map.get(ticket_type, recommendation_map["Консультация"])
+
+
+def _ensure_summary_and_recommendation(
+    result: dict,
+    description_for_summary: str,
+    attachment_context: str | None = None,
+) -> None:
+    summary = result.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        result["summary"] = _default_summary(description_for_summary, attachment_context)
+    else:
+        result["summary"] = summary.strip()
+
+    recommendation = result.get("recommendation")
+    if not isinstance(recommendation, str) or not recommendation.strip():
+        result["recommendation"] = _default_recommendation(result.get("ticket_type", "Консультация"))
+    else:
+        result["recommendation"] = recommendation.strip()
+
+
 def _build_heuristic_result(
     description: str,
     segment: str,
@@ -301,31 +343,13 @@ def _build_heuristic_result(
         sentiment = _infer_sentiment(text_lower, ticket_type)
     priority = _compute_priority(ticket_type, sentiment, segment, description or "", attachment_context)
 
-    summary_parts = []
-    if description:
-        summary_parts.append(_truncate_text(description.replace("\n", " ").strip(), 180))
-    else:
-        summary_parts.append("Текст обращения отсутствует.")
-    if attachment_context:
-        summary_parts.append("Есть вложение со скриншотом.")
-
-    recommendation_map = {
-        "Спам": "Закрыть как спам и не передавать в работу менеджеру.",
-        "Мошеннические действия": "Срочно эскалировать в антифрод и временно ограничить рисковые операции.",
-        "Неработоспособность приложения": "Передать в техподдержку приложения и проверить логи авторизации/операций.",
-        "Смена данных": "Запросить подтверждающие документы и провести обновление данных клиента.",
-        "Претензия": "Передать старшему менеджеру для официального ответа и проверки оснований требований.",
-        "Жалоба": "Проверить ситуацию по счету и подготовить клиенту разъяснение/решение.",
-        "Консультация": "Дать клиенту инструкцию и уточнить детали запроса при необходимости.",
-    }
-
     return {
         "ticket_type": ticket_type,
         "sentiment": sentiment,
         "priority": priority,
         "language": _infer_language(description or ""),
-        "summary": " ".join(summary_parts),
-        "recommendation": recommendation_map.get(ticket_type, recommendation_map["Консультация"]),
+        "summary": _default_summary(description, attachment_context),
+        "recommendation": _default_recommendation(ticket_type),
         "analysis_engine": f"heuristic:{reason}",
     }
 
@@ -514,6 +538,11 @@ def analyze_ticket(
         attachment_context=attachment_context,
     )
     if heuristic is not None:
+        _ensure_summary_and_recommendation(
+            heuristic,
+            description_for_summary=description or "",
+            attachment_context=attachment_context,
+        )
         return heuristic
 
     description_for_llm = _truncate_text(description or "", MAX_DESCRIPTION_CHARS)
@@ -565,7 +594,7 @@ Output exactly:
         print(f"[LLM_LOCAL] Error: {err}. Returning deterministic fallback.")
         fallback_type = "Консультация"
         fallback_sentiment = "Нейтральный"
-        return {
+        result = {
             "ticket_type": fallback_type,
             "sentiment": fallback_sentiment,
             "priority": _compute_priority(
@@ -580,6 +609,12 @@ Output exactly:
             "recommendation": "Провести ручную классификацию и проверить доступность локального LLM-сервиса.",
             "analysis_engine": "fallback:local_llm_error",
         }
+        _ensure_summary_and_recommendation(
+            result,
+            description_for_summary=description or "",
+            attachment_context=attachment_context,
+        )
+        return result
 
     # Validate required fields
     valid_types = set(TICKET_TYPES)
@@ -598,7 +633,11 @@ Output exactly:
         description or "",
         attachment_context,
     )
-
+    _ensure_summary_and_recommendation(
+        result,
+        description_for_summary=description or "",
+        attachment_context=attachment_context,
+    )
     result.setdefault("analysis_engine", f"local:{MODEL}")
     return result
 

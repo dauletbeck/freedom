@@ -37,6 +37,9 @@ class TicketAnalysisOut(BaseModel):
     client_lat: Optional[float]
     client_lon: Optional[float]
     nearest_office: Optional[str]
+    geo_nearest_office: Optional[str]
+    dist_to_nearest_km: Optional[float]
+    dist_to_assigned_km: Optional[float]
     analyzed_at: Optional[datetime]
 
     class Config:
@@ -69,6 +72,7 @@ class TicketOut(BaseModel):
     analysis: Optional[TicketAnalysisOut]
     assignment: Optional[AssignmentOut]
     cross_city_consultation_note: Optional[str] = None
+    skill_gap_routing_note: Optional[str] = None
 
     class Config:
         from_attributes = True

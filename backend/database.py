@@ -30,6 +30,9 @@ def _run_migrations():
     """Apply incremental schema changes that create_all won't add to existing tables."""
     migrations = [
         "ALTER TABLE ticket_analysis ADD COLUMN IF NOT EXISTS attachment_description TEXT;",
+        "ALTER TABLE ticket_analysis ADD COLUMN IF NOT EXISTS geo_nearest_office VARCHAR(100);",
+        "ALTER TABLE ticket_analysis ADD COLUMN IF NOT EXISTS dist_to_nearest_km FLOAT;",
+        "ALTER TABLE ticket_analysis ADD COLUMN IF NOT EXISTS dist_to_assigned_km FLOAT;",
     ]
     with engine.connect() as conn:
         for sql in migrations:

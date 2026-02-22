@@ -50,10 +50,15 @@ interface TicketRow {
     sentiment?: string;
     language?: string;
     priority_score?: number | null;
+    geo_nearest_office?: string;
+    dist_to_nearest_km?: number | null;
+    dist_to_assigned_km?: number | null;
   };
   assignment?: {
     assigned_office?: string;
   };
+  cross_city_consultation_note?: string | null;
+  skill_gap_routing_note?: string | null;
 }
 
 interface ManagerRow {
@@ -146,7 +151,7 @@ export default function Dashboard() {
       ]);
 
       if (!statsRes.ok || !ticketsRes.ok) {
-        throw new Error("Не удалось загрузить данные дашборда.");
+        throw new Error("Не удалось загрузить данные дэшборда.");
       }
 
       const statsData = (await statsRes.json()) as StatsResponse;
@@ -218,6 +223,54 @@ export default function Dashboard() {
   const bySentimentData = useMemo(() => toChartData(bySentiment, "name_asc"), [bySentiment]);
   const bySegmentData = useMemo(() => toChartData(bySegment, "name_asc"), [bySegment]);
 
+  const skillGapTickets = useMemo(
+    () => filteredTickets.filter((t) => t.skill_gap_routing_note),
+    [filteredTickets],
+  );
+  const crossCityTickets = useMemo(
+    () => filteredTickets.filter((t) => t.cross_city_consultation_note),
+    [filteredTickets],
+  );
+
+  const avgDistancePenalty = useMemo(() => {
+    const penalties = skillGapTickets
+      .map((t) => (t.analysis?.dist_to_assigned_km ?? 0) - (t.analysis?.dist_to_nearest_km ?? 0))
+      .filter((p) => p > 0);
+    if (!penalties.length) return 0;
+    return Number((penalties.reduce((a, b) => a + b, 0) / penalties.length).toFixed(0));
+  }, [skillGapTickets]);
+
+  const skillGapReasonData = useMemo(() => {
+    const reasons: Record<string, number> = {};
+    for (const t of skillGapTickets) {
+      let reason = "Другое";
+      if (t.segment === "VIP" || t.segment === "Priority") reason = "VIP навык";
+      else if (t.analysis?.ticket_type === "Смена данных") reason = "Главный специалист";
+      else if (t.analysis?.language === "KZ") reason = "KZ навык";
+      else if (t.analysis?.language === "ENG") reason = "ENG навык";
+      reasons[reason] = (reasons[reason] || 0) + 1;
+    }
+    return Object.entries(reasons)
+      .map(([name, value]) => ({ name, value }))
+      .sort((a, b) => b.value - a.value);
+  }, [skillGapTickets]);
+
+  const officeFlowData = useMemo(() => {
+    const intended: Record<string, number> = {};
+    const received: Record<string, number> = {};
+    for (const t of filteredTickets) {
+      const geo = t.analysis?.geo_nearest_office;
+      const asgn = t.assignment?.assigned_office;
+      if (geo && geo !== "N/A") intended[geo] = (intended[geo] || 0) + 1;
+      if (asgn && asgn !== "N/A") received[asgn] = (received[asgn] || 0) + 1;
+    }
+    const offices = new Set([...Object.keys(intended), ...Object.keys(received)]);
+    return Array.from(offices)
+      .map((o) => ({ name: o, "По гео": intended[o] || 0, "Получено": received[o] || 0 }))
+      .filter((d) => d["По гео"] > 0 || d["Получено"] > 0)
+      .sort((a, b) => b["Получено"] - a["Получено"]);
+  }, [filteredTickets]);
+
   const avgPriority = useMemo(() => {
     const priorities = filteredTickets
       .map((ticket) => ticket.analysis?.priority_score)
@@ -284,7 +337,7 @@ export default function Dashboard() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-white">Дашборд</h1>
+          <h1 className="text-2xl font-bold text-white">Дэшборд</h1>
           <p className="text-sm text-gray-500 mt-0.5">Анализ и распределение обращений</p>
         </div>
         <PipelineButton onComplete={fetchDashboardData} />
@@ -439,6 +492,8 @@ export default function Dashboard() {
                         border: "1px solid #374151",
                         borderRadius: 8,
                       }}
+                      labelStyle={{ color: "#f9fafb" }}
+                      itemStyle={{ color: "#d1d5db" }}
                     />
                     <Bar dataKey="value" radius={[0, 4, 4, 0]}>
                       {byTypeData.map((entry, i) => (
@@ -492,6 +547,8 @@ export default function Dashboard() {
                         border: "1px solid #374151",
                         borderRadius: 8,
                       }}
+                      labelStyle={{ color: "#f9fafb" }}
+                      itemStyle={{ color: "#d1d5db" }}
                     />
                   </PieChart>
                 </ResponsiveContainer>
@@ -537,6 +594,8 @@ export default function Dashboard() {
                         border: "1px solid #374151",
                         borderRadius: 8,
                       }}
+                      labelStyle={{ color: "#f9fafb" }}
+                      itemStyle={{ color: "#d1d5db" }}
                     />
                     <Bar dataKey="value" radius={[4, 4, 0, 0]}>
                       {byOfficeData.map((entry, i) => (
@@ -589,6 +648,8 @@ export default function Dashboard() {
                         border: "1px solid #374151",
                         borderRadius: 8,
                       }}
+                      labelStyle={{ color: "#f9fafb" }}
+                      itemStyle={{ color: "#d1d5db" }}
                     />
                   </PieChart>
                 </ResponsiveContainer>
@@ -694,6 +755,88 @@ export default function Dashboard() {
                 </tbody>
               </table>
             </div>
+          </div>
+
+          {/* ── Alternative Routing Section ────────────────────────────── */}
+          <div className="space-y-4">
+            <div>
+              <h2 className="text-sm font-semibold text-gray-300">Нестандартные назначения</h2>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Обращения, направленные не в ближайший офис из-за нехватки навыков, и случаи с онлайн-альтернативой
+              </p>
+            </div>
+
+            {/* Summary stats */}
+            <div className="grid grid-cols-3 gap-4">
+              <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+                <p className="text-xs text-gray-500">Перенаправлено (навыки)</p>
+                <p className="text-2xl font-bold text-orange-400 mt-1">{skillGapTickets.length}</p>
+                <p className="text-xs text-gray-600 mt-0.5">из {filteredTickets.length} обращений</p>
+              </div>
+              <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+                <p className="text-xs text-gray-500">Онлайн-альтернативы</p>
+                <p className="text-2xl font-bold text-cyan-400 mt-1">{crossCityTickets.length}</p>
+                <p className="text-xs text-gray-600 mt-0.5">клиентов за рубежом</p>
+              </div>
+              <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+                <p className="text-xs text-gray-500">Средний штраф расстояния</p>
+                <p className="text-2xl font-bold text-red-400 mt-1">{avgDistancePenalty} <span className="text-sm font-normal text-gray-500">км</span></p>
+                <p className="text-xs text-gray-600 mt-0.5">доп. расстояние при перенаправлении</p>
+              </div>
+            </div>
+
+            {(skillGapTickets.length > 0 || officeFlowData.length > 0) && (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+
+                {/* Intended vs Received */}
+                <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+                  <h3 className="text-sm font-semibold text-gray-300 mb-1">Запланировано vs Получено</h3>
+                  <p className="text-xs text-gray-500 mb-4">
+                    Синий — куда указывала геолокация, зелёный — фактически назначено. Расхождение = перенаправленная нагрузка.
+                  </p>
+                  <ResponsiveContainer width="100%" height={220}>
+                    <BarChart data={officeFlowData} margin={{ left: 0 }}>
+                      <XAxis dataKey="name" tick={{ fill: "#9ca3af", fontSize: 10 }} angle={-20} textAnchor="end" height={44} />
+                      <YAxis tick={{ fill: "#6b7280", fontSize: 11 }} />
+                      <Tooltip
+                        contentStyle={{ background: "#1f2937", border: "1px solid #374151", borderRadius: 8 }}
+                        labelStyle={{ color: "#f9fafb" }}
+                        itemStyle={{ color: "#d1d5db" }}
+                      />
+                      <Legend formatter={(v) => <span className="text-xs text-gray-400">{v}</span>} />
+                      <Bar dataKey="По гео" fill="#3b82f6" radius={[3, 3, 0, 0]} />
+                      <Bar dataKey="Получено" fill="#10b981" radius={[3, 3, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+
+                {/* Skill gap reasons */}
+                <div className="bg-gray-900 border border-gray-800 rounded-xl p-5">
+                  <h3 className="text-sm font-semibold text-gray-300 mb-1">Причины переадресации</h3>
+                  <p className="text-xs text-gray-500 mb-4">
+                    Какого навыка не хватило в ближайшем офисе, из-за чего клиент был отправлен дальше.
+                  </p>
+                  {skillGapReasonData.length === 0 ? (
+                    <div className="h-[220px] flex items-center justify-center text-gray-500 text-sm">
+                      Нет перенаправлений в выбранной выборке
+                    </div>
+                  ) : (
+                    <ResponsiveContainer width="100%" height={220}>
+                      <BarChart data={skillGapReasonData} layout="vertical" margin={{ left: 8 }}>
+                        <XAxis type="number" tick={{ fill: "#6b7280", fontSize: 11 }} />
+                        <YAxis type="category" dataKey="name" width={150} tick={{ fill: "#9ca3af", fontSize: 11 }} />
+                        <Tooltip
+                          contentStyle={{ background: "#1f2937", border: "1px solid #374151", borderRadius: 8 }}
+                          labelStyle={{ color: "#f9fafb" }}
+                          itemStyle={{ color: "#d1d5db" }}
+                        />
+                        <Bar dataKey="value" fill="#f59e0b" radius={[0, 4, 4, 0]} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         </>
       )}

@@ -19,7 +19,7 @@ from schemas import (
     AssistantResponse,
 )
 from llm import run_assistant_query
-from routing import filter_managers, has_explicit_foreign_location
+from routing import filter_managers, has_explicit_foreign_location, EQUIDISTANT_THRESHOLD_KM
 
 app = FastAPI(title="FIRE — Freedom Intelligent Routing Engine", version="1.0.0")
 
@@ -69,10 +69,66 @@ def _build_cross_city_consultation_note(ticket: Ticket, managers: List[Manager])
     )
 
 
+def _build_skill_gap_routing_note(ticket: Ticket) -> Optional[str]:
+    """
+    Build a note when a client was routed to a non-nearest office because the
+    nearest office had no managers with the required skills (VIP, KZ, ENG, etc.).
+
+    Uses pre-computed distances stored in ticket_analysis (geo_nearest_office,
+    dist_to_nearest_km, dist_to_assigned_km) to avoid re-running Haversine at
+    query time.
+    """
+    if not ticket.analysis or not ticket.assignment:
+        return None
+    if ticket.analysis.ticket_type == "Спам":
+        return None
+
+    geo_nearest = ticket.analysis.geo_nearest_office
+    assigned_office = ticket.assignment.assigned_office
+    dist_nearest = ticket.analysis.dist_to_nearest_km
+    dist_assigned = ticket.analysis.dist_to_assigned_km
+
+    if not geo_nearest or not assigned_office:
+        return None
+    if geo_nearest == assigned_office:
+        return None  # no fallback — normal routing
+    if dist_nearest is None or dist_assigned is None:
+        return None
+    if dist_assigned - dist_nearest <= EQUIDISTANT_THRESHOLD_KM:
+        return None  # within tie-break threshold — not a skill-gap fallback
+
+    # Infer reason from the ticket's constraints
+    segment = ticket.segment or "Mass"
+    ticket_type = ticket.analysis.ticket_type or "Консультация"
+    language = ticket.analysis.language or "RU"
+
+    if segment in ("VIP", "Priority"):
+        reason = f"в офисе {geo_nearest} нет менеджеров с навыком VIP"
+    elif ticket_type == "Смена данных":
+        reason = f"в офисе {geo_nearest} нет Главного специалиста"
+    elif language == "KZ":
+        reason = f"в офисе {geo_nearest} нет менеджеров с навыком KZ"
+    elif language == "ENG":
+        reason = f"в офисе {geo_nearest} нет менеджеров с навыком ENG"
+    else:
+        reason = f"в офисе {geo_nearest} нет подходящих менеджеров"
+
+    return (
+        f"Клиент направлен в {assigned_office} ({dist_assigned:.0f} км), "
+        f"хотя ближайший офис — {geo_nearest} ({dist_nearest:.0f} км). "
+        f"Причина: {reason}. "
+        f"Рекомендуется рассмотреть назначение менеджера из офиса {geo_nearest} в стандартном режиме."
+    )
+
+
 def _serialize_ticket(ticket: Ticket, managers: List[Manager]) -> TicketOut:
     base = TicketOut.model_validate(ticket)
-    note = _build_cross_city_consultation_note(ticket, managers)
-    return base.model_copy(update={"cross_city_consultation_note": note})
+    cross_city_note = _build_cross_city_consultation_note(ticket, managers)
+    skill_gap_note = _build_skill_gap_routing_note(ticket)
+    return base.model_copy(update={
+        "cross_city_consultation_note": cross_city_note,
+        "skill_gap_routing_note": skill_gap_note,
+    })
 
 
 @app.on_event("startup")

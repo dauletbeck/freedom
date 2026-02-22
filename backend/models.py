@@ -64,7 +64,10 @@ class TicketAnalysis(Base):
     recommendation = Column(Text)
     client_lat = Column(Float)
     client_lon = Column(Float)
-    nearest_office = Column(String(100))
+    nearest_office = Column(String(100))    # assigned office (kept for back-compat)
+    geo_nearest_office = Column(String(100))    # geographically closest office by Haversine
+    dist_to_nearest_km = Column(Float)          # km: client → geo_nearest_office
+    dist_to_assigned_km = Column(Float)         # km: client → assigned office
     attachment_description = Column(Text)   # Vision analysis of the image, or missing-attachment note
     analyzed_at = Column(DateTime(timezone=True), server_default=func.now())
 

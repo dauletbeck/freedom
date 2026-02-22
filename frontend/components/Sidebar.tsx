@@ -2,13 +2,14 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Ticket, Users, Bot, Flame } from "lucide-react";
+import { LayoutDashboard, Ticket, Users, Bot, Flame, Map } from "lucide-react";
 import clsx from "clsx";
 
 const links = [
-  { href: "/", label: "Дашборд", icon: LayoutDashboard },
+  { href: "/", label: "Дэшборд", icon: LayoutDashboard },
   { href: "/tickets", label: "Обращения", icon: Ticket },
   { href: "/managers", label: "Менеджеры", icon: Users },
+  { href: "/map", label: "Карта", icon: Map },
   { href: "/assistant", label: "AI Ассистент", icon: Bot },
 ];
 

@@ -194,12 +194,23 @@ SYSTEM_PROMPT = """You are a customer support classifier for Freedom Finance (Ф
 Choose exactly one value for "ticket_type":
 - "Жалоба"                         — general dissatisfaction; no explicit demand for money or compensation
 - "Претензия"                      — formal claim explicitly demanding compensation, refund, or cancellation ("требую", "верните деньги", "претензия", "компенсацию")
-- "Смена данных"                   — request to change personal data: phone, passport, address, email
-- "Консультация"                   — question or information request
-- "Неработоспособность приложения" — app crash, login failure, broken feature, technical error
-- "Мошеннические действия"         — fraud, unauthorized transaction, phishing, suspicious activity
+- "Смена данных"                   — any request (direct OR indirect) to update personal data: phone number, passport, address, or email. Use this even when the client frames it as a login problem or app error — if the root cause or resolution requires changing a personal data field, classify as "Смена данных". Example: "I can't log in, my old phone number is not found, I have a new number" → "Смена данных".
+- "Консультация"                   — purely informational question with no action required; use only when no other type applies
+- "Неработоспособность приложения" — app crash, login failure, or broken feature where no personal data change is needed
+- "Мошеннические действия"         — client is a victim of external fraud: unauthorized transaction by a third party, phishing, account hacking, suspicious activity by unknown actors. Do NOT use this when the client calls the company itself "мошенники" or "мошенническая структура" — that is a "Претензия" or "Жалоба".
 - "Спам"                           — promotional offer, ad, or sales pitch unrelated to the client's account
 </ticket_types>
+
+<classification_priority>
+When a ticket could fit multiple types, use this cascade — stop at the first match:
+1. "Спам" — rule this out first: if the message is a promotional offer, ad, or sales pitch, stop here regardless of other signals
+2. "Мошеннические действия" — client is a victim of external fraud: unauthorized transaction by a third party, phishing, account hacking, suspicious activity by unknown actors. Do NOT use this when the client calls the company itself "мошенники" or "мошенническая структура" — that is a "Претензия" or "Жалоба". However, if the client asks if a third party is a "мошенник" or if they are worried about fraud, that is a signal for "Мошеннические действия".
+3. "Смена данных" — resolution requires updating personal data (phone, passport, address, email), regardless of how the client frames the issue
+4. "Претензия" — explicit demand for compensation, refund, or cancellation
+5. "Неработоспособность приложения" — technical/app error with no personal data change needed
+6. "Жалоба" — general dissatisfaction not covered above
+7. "Консультация" — only if purely asking for information; when unsure between "Консультация" and any other type, prefer the other type
+</classification_priority>
 
 <sentiment>
 Choose exactly one value for "sentiment":
@@ -373,6 +384,48 @@ def _compute_priority(
     return max(1, min(10, priority))
 
 
+def _default_summary(description: str, attachment_context: str | None = None) -> str:
+    summary_parts = []
+    if description and description.strip():
+        summary_parts.append(_truncate_text(description.replace("\n", " ").strip(), 180))
+    else:
+        summary_parts.append("Текст обращения отсутствует.")
+    if attachment_context:
+        summary_parts.append("Есть вложение со скриншотом.")
+    return " ".join(summary_parts)
+
+
+def _default_recommendation(ticket_type: str) -> str:
+    recommendation_map = {
+        "Спам": "Закрыть как спам и не передавать в работу менеджеру.",
+        "Мошеннические действия": "Срочно эскалировать в антифрод и временно ограничить рисковые операции.",
+        "Неработоспособность приложения": "Передать в техподдержку приложения и проверить логи авторизации/операций.",
+        "Смена данных": "Запросить подтверждающие документы и провести обновление данных клиента.",
+        "Претензия": "Передать старшему менеджеру для официального ответа и проверки оснований требований.",
+        "Жалоба": "Проверить ситуацию по счету и подготовить клиенту разъяснение/решение.",
+        "Консультация": "Дать клиенту инструкцию и уточнить детали запроса при необходимости.",
+    }
+    return recommendation_map.get(ticket_type, recommendation_map["Консультация"])
+
+
+def _ensure_summary_and_recommendation(
+    result: dict,
+    description_for_summary: str,
+    attachment_context: str | None = None,
+) -> None:
+    summary = result.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        result["summary"] = _default_summary(description_for_summary, attachment_context)
+    else:
+        result["summary"] = summary.strip()
+
+    recommendation = result.get("recommendation")
+    if not isinstance(recommendation, str) or not recommendation.strip():
+        result["recommendation"] = _default_recommendation(result.get("ticket_type", "Консультация"))
+    else:
+        result["recommendation"] = recommendation.strip()
+
+
 def _build_heuristic_result(
     description: str,
     segment: str,
@@ -387,31 +440,13 @@ def _build_heuristic_result(
         sentiment = _infer_sentiment(text_lower, ticket_type)
     priority = _compute_priority(ticket_type, sentiment, segment, description or "", attachment_context)
 
-    summary_parts = []
-    if description:
-        summary_parts.append(_truncate_text(description.replace("\n", " ").strip(), 180))
-    else:
-        summary_parts.append("Текст обращения отсутствует.")
-    if attachment_context:
-        summary_parts.append("Есть вложение со скриншотом.")
-
-    recommendation_map = {
-        "Спам": "Закрыть как спам и не передавать в работу менеджеру.",
-        "Мошеннические действия": "Срочно эскалировать в антифрод и временно ограничить рисковые операции.",
-        "Неработоспособность приложения": "Передать в техподдержку приложения и проверить логи авторизации/операций.",
-        "Смена данных": "Запросить подтверждающие документы и провести обновление данных клиента.",
-        "Претензия": "Передать старшему менеджеру для официального ответа и проверки оснований требований.",
-        "Жалоба": "Проверить ситуацию по счету и подготовить клиенту разъяснение/решение.",
-        "Консультация": "Дать клиенту инструкцию и уточнить детали запроса при необходимости.",
-    }
-
     return {
         "ticket_type": ticket_type,
         "sentiment": sentiment,
         "priority": priority,
         "language": _infer_language(description or ""),
-        "summary": " ".join(summary_parts),
-        "recommendation": recommendation_map.get(ticket_type, recommendation_map["Консультация"]),
+        "summary": _default_summary(description, attachment_context),
+        "recommendation": _default_recommendation(ticket_type),
         "analysis_engine": f"heuristic:{reason}",
     }
 
@@ -653,6 +688,11 @@ def analyze_ticket(
             attachment_context=attachment_context,
         )
         if heuristic is not None:
+            _ensure_summary_and_recommendation(
+                heuristic,
+                description_for_summary=description or "",
+                attachment_context=attachment_context,
+            )
             return heuristic
 
     description_for_llm = _truncate_text(description or "", MAX_DESCRIPTION_CHARS)
@@ -667,7 +707,10 @@ def analyze_ticket(
     attachment_only_hint = ""
     if not has_text and attachment_context:
         attachment_only_hint = (
-            "No text from client is available. Infer ticket_type/sentiment from attachment context.\n"
+            "No text from client is available. Base ALL output fields "
+            "(ticket_type, sentiment, summary, recommendation) on the attachment context above. "
+            "Write the summary describing what the screenshot shows and what the issue is. "
+            "Write the recommendation telling the manager what action to take.\n"
         )
 
     user_message = f"""Classify this support ticket. Output JSON only.
@@ -684,7 +727,7 @@ Description:
             "model": MODEL,
             "max_completion_tokens": TICKET_MAX_TOKENS,
             "response_format": TICKET_RESPONSE_FORMAT,
-            "reasoning_effort": "low",   # gpt-5-nano: reasoning model; "low" balances speed vs accuracy
+            "reasoning_effort": "low",    # reasoning model: "low" is fast; prompt rules handle disambiguation
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_message},
@@ -712,7 +755,7 @@ Description:
         print(f"[LLM] Fast-path error: {llm_err}. Returning deterministic fallback.")
         fallback_type = "Консультация"
         fallback_sentiment = "Нейтральный"
-        return {
+        result = {
             "ticket_type": fallback_type,
             "sentiment": fallback_sentiment,
             "priority": _compute_priority(
@@ -727,6 +770,12 @@ Description:
             "recommendation": "Провести ручную классификацию и проверить доступность LLM-сервиса.",
             "analysis_engine": "fallback:llm_error",
         }
+        _ensure_summary_and_recommendation(
+            result,
+            description_for_summary=description or "",
+            attachment_context=attachment_context,
+        )
+        return result
 
     # Validate and sanitize required fields
     valid_types = set(TICKET_TYPES)
@@ -745,7 +794,11 @@ Description:
         description or "",
         attachment_context,
     )
-
+    _ensure_summary_and_recommendation(
+        result,
+        description_for_summary=description or "",
+        attachment_context=attachment_context,
+    )
     result.setdefault("analysis_engine", f"llm:{MODEL}")
     return result
 
@@ -759,6 +812,10 @@ You have access to a PostgreSQL database with these tables:
 - managers (id, full_name, position, office, skills, current_load)
 - business_units (id, office_name, address, latitude, longitude)
 - assignments (id, ticket_id, manager_id, assigned_office, round_robin_index, assigned_at)
+
+For distance calculations use this exact Haversine expression (copy it verbatim, keep it on one line, do not reconstruct it):
+  6371 * 2 * ASIN(SQRT(POWER(SIN(RADIANS(bu.latitude - ta.client_lat) / 2), 2) + COS(RADIANS(ta.client_lat)) * COS(RADIANS(bu.latitude)) * POWER(SIN(RADIANS(bu.longitude - ta.client_lon) / 2), 2)))
+Join: tickets t JOIN ticket_analysis ta ON ta.ticket_id = t.id JOIN business_units bu ON bu.office_name = ta.nearest_office
 
 Respond ONLY with valid JSON (no markdown):
 {

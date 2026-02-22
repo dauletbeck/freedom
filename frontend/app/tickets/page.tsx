@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { Search, Filter } from "lucide-react";
+import { Search, ChevronUp, ChevronDown, ChevronsUpDown } from "lucide-react";
 import clsx from "clsx";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -25,26 +25,31 @@ const TYPE_COLOR: Record<string, string> = {
 
 const SEGMENTS = ["", "VIP", "Priority", "Mass"];
 const LANGUAGES = ["", "RU", "KZ", "ENG"];
+const TICKET_TYPES = ["", "Жалоба", "Смена данных", "Консультация", "Претензия", "Неработоспособность приложения", "Мошеннические действия", "Спам"];
 
 export default function TicketsPage() {
   const [tickets, setTickets] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [segment, setSegment] = useState("");
   const [language, setLanguage] = useState("");
+  const [ticketType, setTicketType] = useState("");
   const [search, setSearch] = useState("");
+  const [sortKey, setSortKey] = useState<string | null>(null);
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
 
   const fetchTickets = async () => {
     setLoading(true);
-    const params = new URLSearchParams({ limit: "100" });
+    const params = new URLSearchParams({ limit: "10000" });
     if (segment) params.set("segment", segment);
     if (language) params.set("language", language);
+    if (ticketType) params.set("ticket_type", ticketType);
     const res = await fetch(`${API}/api/tickets?${params}`);
     const data = await res.json();
     setTickets(data);
     setLoading(false);
   };
 
-  useEffect(() => { fetchTickets(); }, [segment, language]);
+  useEffect(() => { fetchTickets(); }, [segment, language, ticketType]);
 
   const filtered = tickets.filter((t) => {
     if (!search) return true;
@@ -56,6 +61,55 @@ export default function TicketsPage() {
       t.assignment?.manager?.full_name?.toLowerCase().includes(q)
     );
   });
+
+  const SORT_GETTERS: Record<string, (t: any) => any> = {
+    guid: (t) => t.guid ?? "",
+    ticket_type: (t) => t.analysis?.ticket_type ?? "",
+    segment: (t) => t.segment ?? "",
+    language: (t) => t.analysis?.language ?? "",
+    priority_score: (t) => t.analysis?.priority_score ?? 0,
+    sentiment: (t) => t.analysis?.sentiment ?? "",
+    city: (t) => t.city ?? "",
+    assigned_office: (t) => t.assignment?.assigned_office ?? "",
+    manager: (t) => t.assignment?.manager?.full_name ?? "",
+  };
+
+  const handleSort = (key: string) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir("asc");
+    }
+  };
+
+  const sorted = sortKey
+    ? [...filtered].sort((a, b) => {
+        const getter = SORT_GETTERS[sortKey];
+        const av = getter(a);
+        const bv = getter(b);
+        const cmp = typeof av === "number"
+          ? av - bv
+          : String(av).localeCompare(String(bv), "ru");
+        return sortDir === "asc" ? cmp : -cmp;
+      })
+    : filtered;
+
+  const SortIcon = ({ col }: { col: string }) => {
+    if (sortKey !== col) return <ChevronsUpDown className="inline w-3 h-3 ml-1 text-gray-600" />;
+    return sortDir === "asc"
+      ? <ChevronUp className="inline w-3 h-3 ml-1 text-blue-400" />
+      : <ChevronDown className="inline w-3 h-3 ml-1 text-blue-400" />;
+  };
+
+  const Th = ({ col, children }: { col: string; children: React.ReactNode }) => (
+    <th
+      className="px-4 py-3 cursor-pointer select-none hover:text-gray-300 whitespace-nowrap"
+      onClick={() => handleSort(col)}
+    >
+      {children}<SortIcon col={col} />
+    </th>
+  );
 
   return (
     <div className="space-y-5">
@@ -91,6 +145,14 @@ export default function TicketsPage() {
           <option value="">Все языки</option>
           {LANGUAGES.filter(Boolean).map((l) => <option key={l}>{l}</option>)}
         </select>
+        <select
+          className="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-300 focus:outline-none focus:border-blue-500"
+          value={ticketType}
+          onChange={(e) => setTicketType(e.target.value)}
+        >
+          <option value="">Все типы</option>
+          {TICKET_TYPES.filter(Boolean).map((t) => <option key={t}>{t}</option>)}
+        </select>
       </div>
 
       {/* Table */}
@@ -100,16 +162,16 @@ export default function TicketsPage() {
             <thead>
               <tr className="text-gray-500 text-left border-b border-gray-800 bg-gray-900/80">
                 <th className="px-4 py-3">#</th>
-                <th className="px-4 py-3">GUID</th>
-                <th className="px-4 py-3">Тип</th>
-                <th className="px-4 py-3">Сегмент</th>
-                <th className="px-4 py-3">Язык</th>
-                <th className="px-4 py-3">Приоритет</th>
-                <th className="px-4 py-3">Тональность</th>
-                <th className="px-4 py-3">Город</th>
-                <th className="px-4 py-3">Офис</th>
-                <th className="px-4 py-3">Менеджер</th>
-                <th className="px-4 py-3">Онлайн</th>
+                <Th col="guid">GUID</Th>
+                <Th col="ticket_type">Тип</Th>
+                <Th col="segment">Сегмент</Th>
+                <Th col="language">Язык</Th>
+                <Th col="priority_score">Приоритет</Th>
+                <Th col="sentiment">Тональность</Th>
+                <Th col="city">Город</Th>
+                <Th col="assigned_office">Офис</Th>
+                <Th col="manager">Менеджер</Th>
+                <th className="px-4 py-3">Альтернатива</th>
               </tr>
             </thead>
             <tbody>
@@ -118,7 +180,7 @@ export default function TicketsPage() {
               ) : filtered.length === 0 ? (
                 <tr><td colSpan={11} className="px-4 py-8 text-center text-gray-500">Нет данных</td></tr>
               ) : (
-                filtered.map((t, i) => (
+                sorted.map((t, i) => (
                   <tr key={t.id} className="border-b border-gray-800/60 hover:bg-gray-800/30 transition-colors">
                     <td className="px-4 py-3 text-gray-600">{i + 1}</td>
                     <td className="px-4 py-3">
@@ -163,7 +225,11 @@ export default function TicketsPage() {
                     <td className="px-4 py-3">
                       {t.cross_city_consultation_note ? (
                         <span className="px-2 py-1 rounded text-xs bg-cyan-900/40 text-cyan-300">
-                          Есть альтернатива
+                          Онлайн
+                        </span>
+                      ) : t.skill_gap_routing_note ? (
+                        <span className="px-2 py-1 rounded text-xs bg-amber-900/40 text-amber-300">
+                          Офис поближе
                         </span>
                       ) : (
                         <span className="text-gray-600">—</span>

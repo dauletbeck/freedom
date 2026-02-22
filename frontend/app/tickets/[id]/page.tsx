@@ -208,6 +208,17 @@ export default function TicketDetailPage() {
                 </p>
               </div>
             )}
+            {ticket.skill_gap_routing_note && (
+              <div className="rounded-lg border border-amber-700/40 bg-amber-900/20 p-3">
+                <div className="mb-1 flex items-center gap-1.5">
+                  <AlertTriangle className="h-3.5 w-3.5 text-amber-300" />
+                  <p className="text-xs text-amber-300">Резервный офис</p>
+                </div>
+                <p className="text-sm leading-relaxed text-amber-100">
+                  {ticket.skill_gap_routing_note}
+                </p>
+              </div>
+            )}
           </div>
         )}
       </Section>

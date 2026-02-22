@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
+import { X, ChevronRight } from "lucide-react";
 import clsx from "clsx";
 
 function LoadBar({ total, assigned, prior }: { total: number; assigned: number; prior: number }) {
@@ -35,6 +37,9 @@ export default function ManagersPage() {
   const [offices, setOffices] = useState<string[]>([]);
   const [selectedOffice, setSelectedOffice] = useState("");
   const [loading, setLoading] = useState(true);
+  const [drawerManager, setDrawerManager] = useState<any | null>(null);
+  const [drawerTickets, setDrawerTickets] = useState<any[]>([]);
+  const [drawerLoading, setDrawerLoading] = useState(false);
 
   useEffect(() => {
     Promise.all([
@@ -46,6 +51,16 @@ export default function ManagersPage() {
       setLoading(false);
     });
   }, []);
+
+  useEffect(() => {
+    if (!drawerManager) return;
+    setDrawerLoading(true);
+    setDrawerTickets([]);
+    fetch(`${API}/api/tickets?manager_id=${drawerManager.id}&limit=500`)
+      .then((r) => r.json())
+      .then((data) => setDrawerTickets(Array.isArray(data) ? data : []))
+      .finally(() => setDrawerLoading(false));
+  }, [drawerManager]);
 
   const filtered = selectedOffice
     ? managers.filter((m) => m.office === selectedOffice)
@@ -96,7 +111,7 @@ export default function ManagersPage() {
               </thead>
               <tbody>
                 {mgrs.sort((a, b) => b.current_load - a.current_load).map((m) => (
-                  <tr key={m.id} className="border-b border-gray-800/30 hover:bg-gray-800/20">
+                  <tr key={m.id} className="border-b border-gray-800/30 hover:bg-gray-800/20 cursor-pointer" onClick={() => setDrawerManager(m)}>
                     <td className="px-5 py-2.5 text-white">{m.full_name}</td>
                     <td className="px-5 py-2.5">
                       <span className={clsx("px-2 py-0.5 rounded text-xs", POSITION_COLOR[m.position] ?? "bg-gray-800 text-gray-400")}>
@@ -119,6 +134,82 @@ export default function ManagersPage() {
             </table>
           </div>
         ))
+      )}
+
+      {/* Manager drawer */}
+      {drawerManager && (
+        <>
+          <div className="fixed inset-0 bg-black/50 z-40" onClick={() => setDrawerManager(null)} />
+          <div className="fixed right-0 top-0 h-full w-full max-w-md bg-gray-950 border-l border-gray-800 z-50 flex flex-col shadow-2xl">
+            <div className="p-5 border-b border-gray-800 flex items-start justify-between gap-3">
+              <div>
+                <p className="text-xs text-gray-500 mb-0.5">Менеджер</p>
+                <h2 className="text-base font-semibold text-white">{drawerManager.full_name}</h2>
+                <p className="text-xs text-gray-400 mt-0.5">
+                  {drawerManager.position} · {drawerManager.office}
+                </p>
+                <div className="flex gap-1 flex-wrap mt-2">
+                  {(drawerManager.skills || []).map((s: string) => (
+                    <span key={s} className="px-1.5 py-0.5 rounded text-xs bg-blue-900/40 text-blue-300">{s}</span>
+                  ))}
+                </div>
+              </div>
+              <button onClick={() => setDrawerManager(null)} className="text-gray-500 hover:text-white transition-colors mt-0.5">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="px-5 py-3 border-b border-gray-800 flex gap-6 text-xs text-gray-400">
+              <span>Нагрузка: <span className="text-white font-semibold">{drawerManager.current_load ?? 0}</span></span>
+              <span>Назначено: <span className="text-blue-300 font-semibold">{drawerManager.assigned_count ?? 0}</span></span>
+            </div>
+
+            <div className="flex-1 overflow-y-auto">
+              {drawerLoading ? (
+                <div className="flex items-center justify-center h-32 text-gray-500 text-sm">Загрузка...</div>
+              ) : drawerTickets.length === 0 ? (
+                <div className="flex items-center justify-center h-32 text-gray-500 text-sm">Нет назначенных обращений</div>
+              ) : (
+                <ul className="divide-y divide-gray-800/60">
+                  {drawerTickets.map((t) => (
+                    <li key={t.id}>
+                      <Link
+                        href={`/tickets/${t.id}`}
+                        className="flex items-center justify-between px-5 py-3 hover:bg-gray-800/40 transition-colors group"
+                      >
+                        <div className="min-w-0">
+                          <p className="text-xs font-mono text-gray-300 truncate group-hover:text-white transition-colors">
+                            {t.guid ?? `#${t.id}`}
+                          </p>
+                          <div className="flex items-center gap-2 mt-1 flex-wrap">
+                            {t.analysis?.ticket_type && (
+                              <span className="text-xs text-gray-500">{t.analysis.ticket_type}</span>
+                            )}
+                            {t.analysis?.sentiment && (
+                              <span className={clsx("text-xs", {
+                                "text-red-400": t.analysis.sentiment === "Негативный",
+                                "text-green-400": t.analysis.sentiment === "Позитивный",
+                                "text-gray-500": t.analysis.sentiment === "Нейтральный",
+                              })}>{t.analysis.sentiment}</span>
+                            )}
+                            {t.segment && (
+                              <span className={clsx("text-xs px-1.5 py-0.5 rounded", {
+                                "bg-amber-900/40 text-amber-300": t.segment === "VIP",
+                                "bg-blue-900/40 text-blue-300": t.segment === "Priority",
+                                "bg-gray-800 text-gray-500": t.segment === "Mass",
+                              })}>{t.segment}</span>
+                            )}
+                          </div>
+                        </div>
+                        <ChevronRight className="w-4 h-4 text-gray-600 group-hover:text-gray-400 shrink-0 ml-3" />
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        </>
       )}
     </div>
   );
