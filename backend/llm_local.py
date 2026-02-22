@@ -84,8 +84,10 @@ SPAM_KEYWORDS = [
     "оборудовани", "в наличии", "купите", "продаж",
 ]
 FRAUD_KEYWORDS = [
-    "мошен", "фишинг", "phishing", "не санкционирован",
-    "несанкционирован", "неизвестн", "украли", "взлом",
+    "мошен", "мошенник", "скам", "scam", "развод", "обман",
+    "фишинг", "phishing", "не санкционирован", "несанкционирован",
+    "неизвестн", "без моего ведома", "без моего согласия",
+    "украли", "украден", "взлом", "поддел", "подмена реквизитов",
     "подозрительн", "чужой перевод",
 ]
 DATA_CHANGE_KEYWORDS = [
@@ -104,6 +106,14 @@ CLAIM_KEYWORDS = [
 NEGATIVE_KEYWORDS = [
     "срочно", "не работает", "ошибка", "невозможно",
     "неправомерно", "возмущен", "жалоба", "проблема", "заблок",
+]
+LOSS_RISK_KEYWORDS = [
+    "потерял деньги", "потеряла деньги", "потеря денег", "потеря прибыли",
+    "убыт", "пропали деньги", "деньги исчезли", "списали деньги",
+    "списание без", "не пришли деньги", "не поступили деньги",
+    "не получил деньги", "не получила деньги", "не могу вывести",
+    "не выводятся", "застряли деньги", "lost money", "funds missing",
+    "profit loss",
 ]
 LEGAL_RISK_KEYWORDS = [
     "суд", "иск", "юрист", "адвокат", "прокурат", "регулятор",
@@ -143,10 +153,24 @@ TICKET_TYPE — choose exactly one:
 1. "Жалоба"                         — general dissatisfaction, no demand for money
 2. "Претензия"                      — formal claim demanding refund/compensation ("требую", "верните", "претензия")
 3. "Смена данных"                   — request to change phone, passport, address, or email
-4. "Консультация"                   — question or information request
+4. "Консультация"                   — question or information request ONLY when there is no scam/loss/risk signal
 5. "Неработоспособность приложения" — app crash, login failure, broken feature, technical error
 6. "Мошеннические действия"         — fraud, unauthorized transaction, phishing, suspicious activity
 7. "Спам"                           — promo offer, ad, or sales pitch unrelated to the client account
+
+DECISION PRIORITY (stop at first match):
+1. "Спам"
+2. "Мошеннические действия" — external fraud/unauthorized transfer/phishing/suspicious third party
+3. "Смена данных"
+4. "Претензия" — explicit demand for refund/compensation/cancellation
+5. "Неработоспособность приложения"
+6. "Жалоба"
+7. "Консультация" — only if purely informational
+
+CONSULTATION GUARDRAIL:
+- Use "Консультация" only if the ticket asks for explanation/instructions and has no red flags.
+- Red flags: missing money, loss/profit loss, unauthorized transfer, suspicious third party, blocked/disappeared funds, request to investigate or return money.
+- If red flags exist, do NOT use "Консультация"; choose "Мошеннические действия" or "Жалоба/Претензия".
 
 SENTIMENT — choose exactly one:
 - "Позитивный" — satisfied or grateful
@@ -267,6 +291,27 @@ def _has_high_impact_signal(description: str, attachment_context: str | None = N
     )
 
 
+def _has_loss_risk_signal(description: str, attachment_context: str | None = None) -> bool:
+    text_lower = f"{description or ''} {attachment_context or ''}".lower()
+    return _contains_any(text_lower, LOSS_RISK_KEYWORDS)
+
+
+def _apply_consultation_guardrail(
+    ticket_type: str,
+    description: str,
+    attachment_context: str | None = None,
+) -> str:
+    if ticket_type != "Консультация":
+        return ticket_type
+
+    text_lower = f"{description or ''} {attachment_context or ''}".lower()
+    if _contains_any(text_lower, FRAUD_KEYWORDS):
+        return "Мошеннические действия"
+    if _has_loss_risk_signal(description, attachment_context) or _has_high_impact_signal(description, attachment_context):
+        return "Жалоба"
+    return ticket_type
+
+
 def _compute_priority(
     ticket_type: str,
     sentiment: str,
@@ -359,7 +404,7 @@ def _try_fast_rule_based_classification(
     segment: str,
     attachment_context: str | None = None,
 ) -> dict | None:
-    text = (description or "").strip()
+    text = f"{description or ''} {attachment_context or ''}".strip()
     if not text:
         return None
     text_lower = text.lower()
@@ -377,6 +422,8 @@ def _try_fast_rule_based_classification(
         return _build_heuristic_result(text, segment, "Смена данных", "data_change", attachment_context)
     if _contains_any(text_lower, APP_ISSUE_KEYWORDS):
         return _build_heuristic_result(text, segment, "Неработоспособность приложения", "app_issue", attachment_context)
+    if _has_loss_risk_signal(text, attachment_context) or _has_high_impact_signal(text, attachment_context):
+        return _build_heuristic_result(text, segment, "Жалоба", "loss_or_risk_signal", attachment_context)
     if "!" in text and _contains_any(text_lower, NEGATIVE_KEYWORDS):
         return _build_heuristic_result(text, segment, "Жалоба", "complaint", attachment_context)
     return None
@@ -593,7 +640,17 @@ Output exactly:
     except Exception as err:
         print(f"[LLM_LOCAL] Error: {err}. Returning deterministic fallback.")
         fallback_type = "Консультация"
-        fallback_sentiment = "Нейтральный"
+        heuristic_fallback = _try_fast_rule_based_classification(
+            description=description or "",
+            segment=segment or "Mass",
+            attachment_context=attachment_context,
+        )
+        if heuristic_fallback is not None:
+            fallback_type = heuristic_fallback.get("ticket_type", fallback_type)
+        fallback_type = _apply_consultation_guardrail(fallback_type, description or "", attachment_context)
+        fallback_sentiment = _infer_sentiment((description or "").lower(), fallback_type)
+        if fallback_type == "Спам":
+            fallback_sentiment = "Нейтральный"
         result = {
             "ticket_type": fallback_type,
             "sentiment": fallback_sentiment,
@@ -622,6 +679,11 @@ Output exactly:
 
     if result.get("ticket_type") not in valid_types:
         result["ticket_type"] = "Консультация"
+    result["ticket_type"] = _apply_consultation_guardrail(
+        result.get("ticket_type", "Консультация"),
+        description or "",
+        attachment_context,
+    )
     if result.get("sentiment") not in valid_sentiments:
         result["sentiment"] = _infer_sentiment((description or "").lower(), result.get("ticket_type", "Консультация"))
     if result.get("ticket_type") == "Спам":

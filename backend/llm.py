@@ -83,13 +83,23 @@ SPAM_KEYWORDS = [
 
 FRAUD_KEYWORDS = [
     "мошен",
+    "мошенник",
+    "скам",
+    "scam",
+    "развод",
+    "обман",
     "фишинг",
     "phishing",
     "не санкционирован",
     "несанкционирован",
     "неизвестн",
+    "без моего ведома",
+    "без моего согласия",
     "украли",
+    "украден",
     "взлом",
+    "поддел",
+    "подмена реквизитов",
     "подозрительн",
     "чужой перевод",
 ]
@@ -144,6 +154,27 @@ NEGATIVE_KEYWORDS = [
     "проблема",
     "заблок",
 ]
+LOSS_RISK_KEYWORDS = [
+    "потерял деньги",
+    "потеряла деньги",
+    "потеря денег",
+    "потеря прибыли",
+    "убыт",
+    "пропали деньги",
+    "деньги исчезли",
+    "списали деньги",
+    "списание без",
+    "не пришли деньги",
+    "не поступили деньги",
+    "не получил деньги",
+    "не получила деньги",
+    "не могу вывести",
+    "не выводятся",
+    "застряли деньги",
+    "lost money",
+    "funds missing",
+    "profit loss",
+]
 LEGAL_RISK_KEYWORDS = [
     "суд",
     "иск",
@@ -195,7 +226,7 @@ Choose exactly one value for "ticket_type":
 - "Жалоба"                         — general dissatisfaction; no explicit demand for money or compensation
 - "Претензия"                      — formal claim explicitly demanding compensation, refund, or cancellation ("требую", "верните деньги", "претензия", "компенсацию")
 - "Смена данных"                   — any request (direct OR indirect) to update personal data: phone number, passport, address, or email. Use this even when the client frames it as a login problem or app error — if the root cause or resolution requires changing a personal data field, classify as "Смена данных". Example: "I can't log in, my old phone number is not found, I have a new number" → "Смена данных".
-- "Консультация"                   — purely informational question with no action required; use only when no other type applies
+- "Консультация"                   — purely informational question with no action required; use only when no other type applies and there is no financial risk/loss signal
 - "Неработоспособность приложения" — app crash, login failure, or broken feature where no personal data change is needed
 - "Мошеннические действия"         — client is a victim of external fraud: unauthorized transaction by a third party, phishing, account hacking, suspicious activity by unknown actors. Do NOT use this when the client calls the company itself "мошенники" or "мошенническая структура" — that is a "Претензия" or "Жалоба".
 - "Спам"                           — promotional offer, ad, or sales pitch unrelated to the client's account
@@ -211,6 +242,17 @@ When a ticket could fit multiple types, use this cascade — stop at the first m
 6. "Жалоба" — general dissatisfaction not covered above
 7. "Консультация" — only if purely asking for information; when unsure between "Консультация" and any other type, prefer the other type
 </classification_priority>
+
+<consultation_guardrail>
+Use "Консультация" only if ALL are true:
+- The client asks only for explanation/instructions.
+- No mention of missing money, loss/profit loss, unauthorized transfer, suspicious third party, or funds that disappeared/are blocked.
+- No request to investigate, reverse, or return money.
+
+If any red flag appears, do NOT use "Консультация":
+- external actor / suspicious transaction / phishing / account compromise -> "Мошеннические действия"
+- financial dispute with company or service failure causing loss -> "Жалоба" or "Претензия" (if explicit demand for compensation/refund)
+</consultation_guardrail>
 
 <sentiment>
 Choose exactly one value for "sentiment":
@@ -364,6 +406,28 @@ def _has_high_impact_signal(description: str, attachment_context: str | None = N
     )
 
 
+def _has_loss_risk_signal(description: str, attachment_context: str | None = None) -> bool:
+    text_lower = f"{description or ''} {attachment_context or ''}".lower()
+    return _contains_any(text_lower, LOSS_RISK_KEYWORDS)
+
+
+def _apply_consultation_guardrail(
+    ticket_type: str,
+    description: str,
+    attachment_context: str | None = None,
+) -> str:
+    """Prevent risky tickets from being labeled as consultation."""
+    if ticket_type != "Консультация":
+        return ticket_type
+
+    text_lower = f"{description or ''} {attachment_context or ''}".lower()
+    if _contains_any(text_lower, FRAUD_KEYWORDS):
+        return "Мошеннические действия"
+    if _has_loss_risk_signal(description, attachment_context) or _has_high_impact_signal(description, attachment_context):
+        return "Жалоба"
+    return ticket_type
+
+
 def _compute_priority(
     ticket_type: str,
     sentiment: str,
@@ -456,7 +520,7 @@ def _try_fast_rule_based_classification(
     segment: str,
     attachment_context: str | None = None,
 ) -> dict | None:
-    text = (description or attachment_context or "").strip()
+    text = f"{description or ''} {attachment_context or ''}".strip()
     if not text:
         return None
 
@@ -478,6 +542,9 @@ def _try_fast_rule_based_classification(
 
     if _contains_any(text_lower, APP_ISSUE_KEYWORDS):
         return _build_heuristic_result(text, segment, "Неработоспособность приложения", "app_issue", attachment_context)
+
+    if _has_loss_risk_signal(text, attachment_context) or _has_high_impact_signal(text, attachment_context):
+        return _build_heuristic_result(text, segment, "Жалоба", "loss_or_risk_signal", attachment_context)
 
     if "!" in text and _contains_any(text_lower, NEGATIVE_KEYWORDS):
         return _build_heuristic_result(text, segment, "Жалоба", "complaint", attachment_context)
@@ -754,7 +821,17 @@ Description:
     except Exception as llm_err:
         print(f"[LLM] Fast-path error: {llm_err}. Returning deterministic fallback.")
         fallback_type = "Консультация"
-        fallback_sentiment = "Нейтральный"
+        heuristic_fallback = _try_fast_rule_based_classification(
+            description=description or "",
+            segment=segment or "Mass",
+            attachment_context=attachment_context,
+        )
+        if heuristic_fallback is not None:
+            fallback_type = heuristic_fallback.get("ticket_type", fallback_type)
+        fallback_type = _apply_consultation_guardrail(fallback_type, description or "", attachment_context)
+        fallback_sentiment = _infer_sentiment((description or "").lower(), fallback_type)
+        if fallback_type == "Спам":
+            fallback_sentiment = "Нейтральный"
         result = {
             "ticket_type": fallback_type,
             "sentiment": fallback_sentiment,
@@ -783,6 +860,11 @@ Description:
 
     if result.get("ticket_type") not in valid_types:
         result["ticket_type"] = "Консультация"
+    result["ticket_type"] = _apply_consultation_guardrail(
+        result.get("ticket_type", "Консультация"),
+        description or "",
+        attachment_context,
+    )
     if result.get("sentiment") not in valid_sentiments:
         result["sentiment"] = _infer_sentiment((description or "").lower(), result.get("ticket_type", "Консультация"))
     if result.get("ticket_type") == "Спам":
